@@ -20,6 +20,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+import arc_agi
 import taaf.benchmark
 import taaf.deploy
 import taaf.deploy_inline
@@ -162,15 +163,16 @@ def _make_games(
             taaf.game_api.GameAPI(env_name=game_id, arcade_spec=arcade_spec)
             for game_id in game_ids
         ]
-    arcade_spec = (
-        None
-        if not environments_dir
-        else taaf.game_api.ArcadeSpec(environments_dir=str(environments_dir))
-    )
+    if environments_dir:
+        arcade_spec = taaf.game_api.ArcadeSpec(environments_dir=str(environments_dir))
+    else:
+        # Offline ``__auto__`` env files are not bundled in this build.
+        arcade_spec = taaf.game_api.ArcadeSpec(
+            operation_mode=arc_agi.OperationMode.ONLINE,
+            environments_dir="",
+        )
     return [
-        taaf.game_api.GameAPI(env_name=game_id)
-        if arcade_spec is None
-        else taaf.game_api.GameAPI(env_name=game_id, arcade_spec=arcade_spec)
+        taaf.game_api.GameAPI(env_name=game_id, arcade_spec=arcade_spec)
         for game_id in game_ids
     ]
 
