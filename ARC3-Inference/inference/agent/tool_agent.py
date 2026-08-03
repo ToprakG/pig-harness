@@ -960,6 +960,7 @@ class ToolAgent:
         api_key = (
             self._api_key
             or os.environ.get("LOCAL_ANALYZER_API_KEY", "").strip()
+            or os.environ.get("CEREBRAS_API_KEY", "").strip()
             or os.environ.get("OPENROUTER_API_KEY", "").strip()
             or os.environ.get("OPENAI_API_KEY", "").strip()
         )

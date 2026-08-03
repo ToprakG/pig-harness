@@ -128,6 +128,7 @@ def main() -> int:
     api_key = (
         os.environ.get("CHAT_API_KEY", "").strip()
         or os.environ.get("LOCAL_ANALYZER_API_KEY", "").strip()
+        or os.environ.get("CEREBRAS_API_KEY", "").strip()
         or os.environ.get("OPENROUTER_API_KEY", "").strip()
         or os.environ.get("OPENAI_API_KEY", "").strip()
     )

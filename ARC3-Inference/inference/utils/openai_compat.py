@@ -10,6 +10,8 @@ def normalize_provider(value: str | None) -> str:
         return "vllm"
     if provider in {"openrouter", "router"}:
         return "openrouter"
+    if provider == "cerebras":
+        return "cerebras"
     return provider
 
 

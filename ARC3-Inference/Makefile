@@ -207,6 +207,7 @@ export MULTIMODAL_CONTEXT
 export MULTIMODAL_UPSCALE
 export CHAT_PROVIDER
 export OPENROUTER_API_KEY
+export CEREBRAS_API_KEY
 export OPENAI_API_KEY
 export LOCAL_ANALYZER_API_KEY
 export CHAT_API_KEY
@@ -412,6 +413,12 @@ _taaf-run:
 	fi
 	@local_analyzer_api_key="$${LOCAL_ANALYZER_API_KEY:-}"; \
 	case "$(LOCAL_ANALYZER_PROVIDER)" in \
+		cerebras) \
+			if [ -z "$$local_analyzer_api_key" ] && [ -z "$${CEREBRAS_API_KEY:-}" ] && [ -z "$${OPENAI_API_KEY:-}" ]; then \
+				echo "Cerebras analyzer config requires CEREBRAS_API_KEY, LOCAL_ANALYZER_API_KEY, or OPENAI_API_KEY."; \
+				exit 1; \
+			fi; \
+			;; \
 		openrouter) \
 			if [ -z "$$local_analyzer_api_key" ] && [ -z "$${OPENROUTER_API_KEY:-}" ] && [ -z "$${OPENAI_API_KEY:-}" ]; then \
 				echo "OpenRouter analyzer config requires OPENROUTER_API_KEY, LOCAL_ANALYZER_API_KEY, or OPENAI_API_KEY."; \
