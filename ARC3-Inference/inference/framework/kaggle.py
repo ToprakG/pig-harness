@@ -137,6 +137,7 @@ def duck_kaggle_setup_command(config: DuckKaggleVllmConfig | None = None) -> str
         "__LOCAL_ANALYZER_ENABLE_THINKING__": repr(os.environ.get("LOCAL_ANALYZER_ENABLE_THINKING", "1")),
         "__MULTIMODAL_CONTEXT__": repr(os.environ.get("MULTIMODAL_CONTEXT", "current_grid")),
         "__MULTIMODAL_UPSCALE__": repr(os.environ.get("MULTIMODAL_UPSCALE", "4")),
+        "__COMPACTION_CONFIG__": repr(os.environ.get("COMPACTION_CONFIG", "")),
         "__VLLM_TENSOR_PARALLEL_SIZE__": repr(int(cfg.tensor_parallel_size)),
         "__WHEELHOUSE_STAMP_TEXT__": repr(cfg.wheelhouse_stamp_text),
         "__VLLM_TOOL_CALL_PARSER__": repr(cfg.tool_call_parser),
@@ -205,6 +206,7 @@ def duck_kaggle_remote_setup_command() -> str:
         "__LOCAL_ANALYZER_ENABLE_THINKING__": repr(os.environ.get("LOCAL_ANALYZER_ENABLE_THINKING", "0")),
         "__MULTIMODAL_CONTEXT__": repr(os.environ.get("MULTIMODAL_CONTEXT", "current_grid")),
         "__MULTIMODAL_UPSCALE__": repr(os.environ.get("MULTIMODAL_UPSCALE", "16")),
+        "__COMPACTION_CONFIG__": repr(os.environ.get("COMPACTION_CONFIG", "")),
     }
     script = _DUCK_REMOTE_SETUP_SCRIPT
     for placeholder, value in replacements.items():
@@ -517,6 +519,7 @@ setup_env = {
     'LOCAL_ANALYZER_ENABLE_THINKING': __LOCAL_ANALYZER_ENABLE_THINKING__,
     'MULTIMODAL_CONTEXT': __MULTIMODAL_CONTEXT__,
     'MULTIMODAL_UPSCALE': __MULTIMODAL_UPSCALE__,
+    'COMPACTION_CONFIG': __COMPACTION_CONFIG__,
 }
 setup_env_path = Path(os.environ['TAAF_KAGGLE_SETUP_ENV'])
 existing_setup_env = {}
@@ -602,6 +605,7 @@ setup_env = {
     'LOCAL_ANALYZER_ENABLE_THINKING': __LOCAL_ANALYZER_ENABLE_THINKING__,
     'MULTIMODAL_CONTEXT': __MULTIMODAL_CONTEXT__,
     'MULTIMODAL_UPSCALE': __MULTIMODAL_UPSCALE__,
+    'COMPACTION_CONFIG': __COMPACTION_CONFIG__,
 }
 setup_env_path = Path(os.environ['TAAF_KAGGLE_SETUP_ENV'])
 existing_setup_env = {}
