@@ -10,7 +10,7 @@ readme = "README.md"
 authors = [
     { name = "ARC3 Inference authors" },
 ]
-requires-python = "==3.12.12"
+requires-python = ">=3.12,<3.13"
 keywords = ["arc-agi", "agent", "puzzle-solving"]
 dependencies = [
     "arcengine==0.9.3",

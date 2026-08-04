@@ -1,79 +1,40 @@
 {
   "shared": {
-    "model_name": "gemma-4-31b",
+    "model_name": "gpt-oss-120b",
     "base_url": "https://api.cerebras.ai/v1",
     "provider": "cerebras",
     "context_window": 32768
   },
-  "experiments": {
-    "root_dir": "runs/{username}"
-  },
+  "experiments": { "root_dir": "/tmp/pig-runs" },
   "environment": {
     "dataset": "",
-    "include_tags": ["official"],
+    "include_tags": [],
     "exclude_tags": [],
-    "games": [],
+    "games": ["ft09", "vc33"],
     "max_steps": null,
-    "max_runtime_minutes": 45,
+    "max_runtime_minutes": 12,
     "max_experiment_runtime_minutes": null,
     "max_experiment_runtime_hours": null,
-    "n_passes": 1,
+    "n_passes": 3,
     "concurrent_jobs": 4
   },
   "deployment": {
-    "target": "inline",
-    "wait": false,
+    "target": "inline", "wait": false,
     "source_repos": ["../tufa-arc-agi-framework"],
-    "slurm": {
-      "gpu": "B200",
-      "gpu_count": 1,
-      "time": "07:00:00",
-      "image": "",
-      "partition": "gpu",
-      "nodelist": "",
-      "start_local_server": false,
-      "extra_sbatch_flags": ["--account=default", "--qos=normal"]
-    }
+    "slurm": {"gpu": "B200","gpu_count": 1,"time": "01:00:00","image": "",
+              "partition": "gpu","nodelist": "","start_local_server": false,
+              "extra_sbatch_flags": []}
   },
-  "server": {
-    "backend": "vllm",
-    "host": "127.0.0.1",
-    "port": 1234,
-    "tensor_parallel_size": 1,
-    "generation_config": "vllm",
-    "language_model_only": false,
-    "enable_prefix_caching": true,
-    "tool_call_parser": "qwen3_coder",
-    "reasoning_parser": "qwen3",
-    "default_chat_template_kwargs": {
-      "preserve_thinking": true
-    }
-  },
-  "analyzer": {
-    "app_name": "ARC3 Agent Harness",
-    "max_output": 0,
-    "thinking": false,
-    "temperature": 0.6,
-    "top_p": 0.95,
-    "top_k": 20,
-    "timeout": 120,
-    "tool_steps": 0,
-    "tool_timeout": 30,
-    "tool_output_tokens": 1024,
-    "save_request_logs": false
-  },
-  "chat": {
-    "max_tokens": 2048,
-    "temperature": 0.7,
-    "top_p": 0.8,
-    "top_k": 20,
-    "thinking": false
-  },
-  "viewer": {
-    "port": 8025
-  },
-  "multimodal": {
-    "context": "current_grid",
-    "upscale": 16
-  }
+  "server": {"backend": "vllm","host": "127.0.0.1","port": 1234,
+    "tensor_parallel_size": 1,"generation_config": "vllm",
+    "language_model_only": true,"enable_prefix_caching": true,
+    "tool_call_parser": "qwen3_coder","reasoning_parser": "qwen3",
+    "default_chat_template_kwargs": {"preserve_thinking": true}},
+  "analyzer": {"app_name": "ARC3 Agent Harness","max_output": 0,
+    "thinking": true,"temperature": 0.6,"top_p": 0.95,"top_k": 20,
+    "timeout": 120,"tool_steps": 0,"tool_timeout": 30,
+    "tool_output_tokens": 1024,"save_request_logs": false},
+  "chat": {"max_tokens": 2048,"temperature": 0.7,"top_p": 0.8,"top_k": 20,"thinking": true},
+  "viewer": {"port": 8025},
+  "multimodal": {"context": "none", "upscale": 4}
 }

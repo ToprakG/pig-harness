@@ -33,6 +33,7 @@ olarak bağlamda kalır.
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
 
@@ -148,12 +149,17 @@ class CompactionStore:
     """
 
     def __init__(self, max_notes: int = MAX_NOTES) -> None:
+        # A/B icin anahtar: PIG_COMPACTION=0 ile kapatilinca sinif tamamen
+        # pasif olur ve davranis duck taban cizgisiyle birebir ayni kalir.
+        self.enabled = os.environ.get("PIG_COMPACTION", "1").strip() != "0"
         self._notes: list[str] = []
         self._max_notes = max_notes
         self.compactions = 0
         self.dropped_messages = 0
 
     def add_dropped(self, messages: list[dict[str, Any]]) -> None:
+        if not self.enabled:
+            return
         notes = summarize_dropped(messages)
         if not notes:
             return
@@ -177,7 +183,7 @@ class CompactionStore:
         return list(self._notes)
 
     def as_lines(self) -> list[str]:
-        if not self._notes:
+        if not self.enabled or not self._notes:
             return []
         return [
             "COMPACTED HISTORY (older turns were compressed, not discarded):",

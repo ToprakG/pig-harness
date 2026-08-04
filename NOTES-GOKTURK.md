@@ -54,3 +54,34 @@ verimlilik hâlâ açık bir cephe.
 - Bu değişikliklerin duck taban çizgisine karşı A/B ölçümü (asıl iş).
 - Agentic Harness sözleşmesine paketleme (`agent/my_agent.py`,
   `agent/harbor_agent.py`, `main.py`) — bu repo şu an Kaggle notebook şeklinde.
+
+## A/B düzeneği
+
+`run_ab.sh` — aynı kod, tek fark `PIG_COMPACTION` (0/1). `CompactionStore`
+kapalıyken tamamen pasif, yani kapalı kol duck taban çizgisiyle birebir aynı.
+
+**Neden az oyun, çok pass:** iki kol arasındaki farkı görünür kılan şey oyun
+çeşitliliği değil, aynı oyunda tekrarlanan koşuların varyansının ortalanması.
+Duck'ın kendi sayıları bunun ne kadar gürültülü olduğunu gösteriyor —
+ar25'in 20 pass skoru `0.0, 0.0, 0.0, 0.04, ... 6.81, 7.06, 8.33`. Tek pass'a
+bakıp karar vermek yanıltıcı olur.
+
+Seçilen oyunlar: **ft09** ve **vc33** — duck'ın ısı haritasında en tutarlı
+sıfır-olmayan iki oyun (ft09 ort. 10.28, vc33 ort. 3.33). Sıfır alan oyunlarda
+A/B hiçbir şey ölçemez.
+
+## Yerelde duck'ı koşturma (kurulum notları)
+
+vLLM gerekmiyor — o sadece opsiyonel `server` ekstrası. Çekirdek bağımlılıklar
+hafif (arcengine, matplotlib, python-dotenv, requests, taaf).
+
+Karşılaşılan üç engel ve çözümü:
+1. `requires-python = "==3.12.12"` çok katı → `>=3.12,<3.13`.
+2. Editable kurulumun `.pth` dosyası yüklenmiyor (dizin adında **boşluk** var:
+   `Exposure AI`). Çözüm: `PYTHONPATH` ile hem `ARC3-Inference` hem
+   `tufa-arc-agi-framework/src` verilmeli.
+3. `base_url` config'den değil `LOCAL_ANALYZER_BASE_URL` / `OPENAI_BASE_URL`
+   env değişkeninden okunuyor; `OPENAI_PROVIDER=cerebras` ile birlikte
+   verilmezse yerel vLLM'e (127.0.0.1:1234) gidip sessizce 0 aksiyon üretiyor.
+
+Çalışan komut `run_ab.sh` içinde.
