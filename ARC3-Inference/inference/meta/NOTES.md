@@ -23,3 +23,21 @@ these are reported, not silently skipped.
   runs *terminate* on a game-over event.
 * All other survival-block reference statistics reproduce exactly
   (`extract.py --verify`: 16/16 PASS).
+
+## Phase 2 — model fitting notes
+
+* `survival.py`: all reference numbers reproduce (KM checkpoints, hazard
+  windows, t=40 groups n=88/248, noop rates 0.042/0.122, actions-per-LLM-call
+  5.13/2.85). Group membership at t=40 is defined as `total_actions >= 40`
+  and `first_clear > 40`.
+* `hazard.py` novelty definition: `novelty_30` = fraction of **distinct**
+  board hashes among the trailing 30 actions. The alternative
+  "globally-new-to-run hash rate" produces the *wrong sign* (−0.70) because
+  global novelty mechanically decays with time; the distinct-hash-window
+  definition matches the spec's expected fit region and is directly
+  computable online from a 30-slot ring buffer.
+* Fit vs expected region: rows 4510 (~4.5k ✓), events 205 (spec ~186),
+  coef(log_t) −0.795 (≈ −0.7 ✓), coef(novelty_30) +1.71 (≈ +2.0 ✓),
+  coef(noop_20) −3.16 (spec ≈ −1.8: same sign, larger magnitude — sensitive
+  to the exact person-period construction; the sign + AUC acceptance
+  criteria pass, AUC 0.769 ≥ 0.72). Calibration is close to the diagonal.
