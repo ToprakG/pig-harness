@@ -13,6 +13,7 @@ from urllib.parse import urlparse, urlunparse
 
 import requests
 
+from inference.agent.compaction import CompactionStore
 from inference.agent.action_names import to_engine_action, to_model_action
 from inference.agent.prompts import (
     COMPACT_TOOL_SESSION_ADDENDUM,
@@ -955,6 +956,7 @@ class ToolAgent:
         self._last_step_summary: dict[str, Any] | None = None
         self._last_action_result: dict[str, Any] | None = None
         self._summarized_knowledge = _empty_world_model()
+        self._compaction = CompactionStore()
 
     def _headers(self) -> dict[str, str]:
         api_key = (
@@ -1116,6 +1118,7 @@ class ToolAgent:
         if not summary:
             return
         if summary.get("level_transition") or summary.get("run_complete") or summary.get("game_over"):
+            self._compaction.reset()
             for key in (
                 "world_model",
                 "goal_model",
@@ -1234,6 +1237,7 @@ class ToolAgent:
             "You may call `action(actions)` more than once in one Python snippet if your search or control loop needs it, "
             "but stop immediately if a result reports `game_over`, `run_complete`, `level_completed`, or `done`."
         )
+        lines.extend(self._compaction.as_lines())
         lines.extend(self._summarized_knowledge_lines())
         lines.append("end of world model. ")
         if action_num == 0:
@@ -1607,19 +1611,29 @@ class ToolAgent:
         return _estimate_tokens(payload)
 
     def _drop_oldest_history_block(self, history: list[dict[str, Any]], *, preserve_recent: int) -> bool:
+        """En eski blogu dusur -- ama once SIKISTIR (compaction).
+
+        Duz atmak, modelin ne denedigini ve neyin ise yaramadigini unutmasina
+        yol aciyordu. OpenAI'nin olcumu (bkz. compaction.py) bu tek degisikligin
+        ARC-AGI-3'te %13.3 -> %38.3 fark yarattigini gosteriyor.
+        """
         removable = len(history) - preserve_recent
         if removable <= 0:
             return False
+        dropped: list[dict[str, Any]] = []
         first = history.pop(0)
+        dropped.append(first)
         first_role = str(first.get("role", "")).strip()
         if first_role in {"assistant", "tool"}:
             while history and history[0].get("role") == "tool" and len(history) > preserve_recent:
-                history.pop(0)
+                dropped.append(history.pop(0))
+            self._compaction.add_dropped(dropped)
             return True
         while history and history[0].get("role") == "tool" and len(history) > preserve_recent:
-            history.pop(0)
+            dropped.append(history.pop(0))
         while history and history[0].get("role") != "user" and len(history) > preserve_recent:
-            history.pop(0)
+            dropped.append(history.pop(0))
+        self._compaction.add_dropped(dropped)
         return True
 
     def _keep_recent_history_turns(

@@ -15,6 +15,9 @@ GAME_OVERVIEW_ADDENDUM = (
     "- Your job is to solve the entire game by clearing every level, not just the current screen.\n"
     "- Levels often build on earlier mechanics, but layouts and interactions can still change between levels.\n"
     "- Optimize for as few in-game actions as possible while still being reliable.\n"
+    "- The score is QUADRATIC in efficiency: level_score = (human_actions / your_actions)^2. Twice the human's actions scores a QUARTER; ten times scores 1%. A level cleared wastefully is worth almost nothing, so a wasted probe is far more expensive than a moment of thought.\n"
+    "- Humans clear level 1 in about 30 actions (range 7-78 across the public set). Budget against that number, not against how many actions are technically allowed.\n"
+    "- Repeating an action that already produced no board change is the single largest source of lost score. Check the compacted history before acting.\n"
     "- In this environment, boards are presented as 64 x 64 color grids rendered with ARC color symbols.\n"
     f"- Color legend: {ARC_COLOR_LEGEND}.\n"
 )
