@@ -359,6 +359,19 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
         )
 
 
+    # Hand each wrapper the contract of the function it delegates to, so a helper can be looked
+    # up on demand with `print(helper.__doc__)` rather than described in full in every prompt.
+    FrameView.crop.__doc__ = crop_ascii.__doc__
+    FrameView.window.__doc__ = window_ascii.__doc__
+    diff_frames.__doc__ = diff_grids.__doc__
+    track_objects.__doc__ = match_objects.__doc__
+    find_background.__doc__ = identify_background.__doc__
+    find_hud.__doc__ = detect_hud.__doc__
+    find_symmetry.__doc__ = detect_symmetry.__doc__
+    path_between.__doc__ = find_path.__doc__
+    _action_effects.__doc__ = summarize_action_effects.__doc__
+
+
     def _frame_from_payload(payload):
         if not isinstance(payload, dict):
             return None
@@ -537,11 +550,13 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             runtime_globals["last_action_frame"] = (
                 last_transition.after_frame if last_transition is not None else None
             )
-            runtime_globals["action_effects"] = (
-                lambda level_only=True, **kwargs: _action_effects(
+            def action_effects(level_only=True, **kwargs):
+                return _action_effects(
                     transitions, current_frame, level_only=level_only, **kwargs
                 )
-            )
+
+            action_effects.__doc__ = summarize_action_effects.__doc__
+            runtime_globals["action_effects"] = action_effects
             runtime_globals["last_action"] = last_transition.action if last_transition is not None else None
             runtime_globals["valid_actions"] = [str(item) for item in state_payload.get("valid_actions", [])]
             runtime_globals["last_action_result"] = action_result
