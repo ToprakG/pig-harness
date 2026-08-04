@@ -10,7 +10,9 @@
   },
   "environment": {
     "dataset": "",
-    "include_tags": ["official"],
+    "include_tags": [
+      "official"
+    ],
     "exclude_tags": [],
     "games": [],
     "max_steps": null,
@@ -23,7 +25,9 @@
   "deployment": {
     "target": "inline",
     "wait": false,
-    "source_repos": ["../tufa-arc-agi-framework"],
+    "source_repos": [
+      "../tufa-arc-agi-framework"
+    ],
     "slurm": {
       "gpu": "B200",
       "gpu_count": 2,
@@ -32,10 +36,13 @@
       "partition": "gpu",
       "nodelist": "",
       "start_local_server": true,
-      "extra_sbatch_flags": ["--account=default", "--qos=normal"]
+      "extra_sbatch_flags": [
+        "--account=default",
+        "--qos=normal"
+      ]
     }
   },
-  "server" : {
+  "server": {
     "backend": "vllm",
     "host": "127.0.0.1",
     "port": 1234,
@@ -75,9 +82,9 @@
   "viewer": {
     "port": 8021
   },
-  "multimodal" : {
-    "context" : "current_grid",
-    "upscale" : 4
+  "multimodal": {
+    "context": "current_grid",
+    "upscale": 4
   },
   "meta": {
     "enabled": false,
@@ -92,5 +99,15 @@
       "p_E": 0.83,
       "p_H": 0.15
     }
+  },
+  "compaction": {
+    "enabled": false,
+    "digest_max_tokens": 700,
+    "compaction_call_max_tokens": 900,
+    "compaction_timeout_s": 20,
+    "min_dropped_tokens_to_compact": 800,
+    "wipe_knowledge_on_level_transition": true,
+    "wipe_knowledge_on_reset": true
+
   }
 }
