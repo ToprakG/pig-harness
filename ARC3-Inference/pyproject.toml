@@ -31,6 +31,11 @@ dev = [
     "pytest==9.0.2",
     "ruff==0.15.6",
 ]
+meta = [
+    "pandas==2.3.3",
+    "pyarrow==21.0.0",
+    "scikit-learn==1.7.2",
+]
 server = [
     "ninja==1.13.0",
     "vllm @ https://wheels.vllm.ai/8fbe3f303fbf995afe4c409309aa8e889235339e/vllm-0.17.2rc1.dev150%2Bg8fbe3f303-cp38-abi3-manylinux_2_31_x86_64.whl",
