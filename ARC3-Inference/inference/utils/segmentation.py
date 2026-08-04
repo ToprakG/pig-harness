@@ -62,14 +62,43 @@ def _corner_points(contour):
     return corners
 
 
+def _bbox(cells):
+    """Tight ``[min_row, min_col, max_row, max_col]`` around a set of cells."""
+    rows = [r for r, _ in cells]
+    cols = [c for _, c in cells]
+    return [min(rows), min(cols), max(rows), max(cols)]
+
+
+def _centroid(cells):
+    """Mean cell position, rounded to one decimal.
+
+    For a ring or L-shape the centroid can fall outside the object, so use it to compare
+    positions rather than as a guaranteed in-object click target.
+    """
+    total = len(cells)
+    row_sum = sum(r for r, _ in cells)
+    col_sum = sum(c for _, c in cells)
+    return [round(row_sum / total, 1), round(col_sum / total, 1)]
+
+
+def _normalized_cells(cells):
+    """Cell offsets from the top-left of the bounding box, sorted: a position-free shape."""
+    min_r = min(r for r, _ in cells)
+    min_c = min(c for _, c in cells)
+    return sorted((r - min_r, c - min_c) for r, c in cells)
+
+
 def _object_hash(cells, color):
     """Translation-invariant signature of an object: its color plus its cell shape,
     normalized so the top-left of its bounding box is the origin. Same shape + color
     => same hash regardless of position, so objects can be matched across frames."""
-    min_r = min(r for r, _ in cells)
-    min_c = min(c for _, c in cells)
-    norm = sorted((r - min_r, c - min_c) for r, c in cells)
-    payload = repr((color, norm)).encode()
+    payload = repr((color, _normalized_cells(cells))).encode()
+    return hashlib.sha1(payload).hexdigest()[:16]
+
+
+def _shape_hash(cells):
+    """Like ``_object_hash`` but ignoring color, so a recolored object keeps its shape id."""
+    payload = repr(_normalized_cells(cells)).encode()
     return hashlib.sha1(payload).hexdigest()[:16]
 
 
@@ -90,7 +119,13 @@ def segment_layer(layer, color_chars):
         cell shape normalized to a top-left origin -- so the same shape gets the same
         hash regardless of position (lets objects be matched across frames, or when
         several similar objects appear in one frame).
+      - ``shape_hash``: the same signature with color left out, so two objects of different
+        colors but identical shape share it, and a recolored object keeps it.
       - ``pixels``: number of cells in the component.
+      - ``bbox``: tight ``[min_row, min_col, max_row, max_col]`` around the component.
+      - ``centroid``: ``[row, col]`` mean cell position, rounded to one decimal. It can
+        fall outside the component for shapes like rings, so treat it as a position for
+        comparison rather than as a guaranteed in-object target.
       - ``boundary``: the component's outer perimeter as an ordered, clockwise list of
         ``[row, col]`` corner points -- a Moore-neighbour trace reduced to only the
         vertices where the contour changes direction (enclosed holes are not traced).
@@ -194,7 +229,10 @@ def segment_layer(layer, color_chars):
                 "id": cid,
                 "color": color,
                 "hash": _object_hash(comp["cells"], color),
+                "shape_hash": _shape_hash(comp["cells"]),
                 "pixels": len(comp["cells"]),
+                "bbox": _bbox(comp["cells"]),
+                "centroid": _centroid(comp["cells"]),
                 "boundary": [[r, c] for r, c in boundary],
                 "children": children[cid],
             }

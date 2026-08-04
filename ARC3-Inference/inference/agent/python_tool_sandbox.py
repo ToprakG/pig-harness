@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -14,8 +15,53 @@ import textwrap
 import time
 from typing import Any, Callable
 
+from inference.perception import background as _background
+from inference.perception import crop as _crop
+from inference.perception import diffing as _diffing
+from inference.perception import effects as _effects
+from inference.perception import grid as _grid
+from inference.perception import hud as _hud
+from inference.perception import objects as _objects
+from inference.perception import pathfinding as _pathfinding
+from inference.perception import symmetry as _symmetry
 from inference.utils import segmentation as _segmentation
 from inference.utils.grid_utils import ARC_COLOR_CHARS
+
+# Definition order does not matter -- names resolve at call time -- but dependencies come
+# first so the assembled bootstrap reads top-down.
+_PERCEPTION_MODULES = (
+    _grid,
+    _objects,
+    _crop,
+    _background,
+    _hud,
+    _symmetry,
+    _pathfinding,
+    _diffing,
+    _effects,
+)
+
+_PROJECT_IMPORT = re.compile(r"^(?:from|import)\s+inference\b")
+
+
+def _sandbox_source(module) -> str:
+    """Module source with its project imports removed.
+
+    The perception modules are pasted into a single flat namespace in the sandbox, where
+    project packages cannot be imported, so imports between them are both unnecessary and
+    unresolvable there. Parenthesized multi-line imports are dropped in full.
+    """
+    kept = []
+    skipping = False
+    for line in inspect.getsource(module).splitlines(keepends=True):
+        if skipping:
+            skipping = ")" not in line
+            continue
+        if _PROJECT_IMPORT.match(line):
+            skipping = "(" in line and ")" not in line
+            continue
+        kept.append(line)
+    return "".join(kept)
 
 
 _SANDBOX_BOOTSTRAP = textwrap.dedent(
@@ -36,6 +82,8 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
     COLOR_CHARS = ""
 
     __SEGMENTATION_SOURCE__
+
+    __PERCEPTION_SOURCE__
 
     HOST_STDOUT = sys.stdout
 
@@ -139,6 +187,14 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
                 self._segmentation = segment_layer(self._grid, COLOR_CHARS)
             return self._segmentation
 
+        # ASCII for one region, clipped to the frame; labels put the coordinates on it.
+        def crop(self, bbox, labels=True):
+            return crop_ascii(self._grid, COLOR_CHARS, bbox, labels=labels)
+
+        # ASCII for the square within `radius` cells of (row, col).
+        def window(self, row, col, radius=3, labels=True):
+            return window_ascii(self._grid, COLOR_CHARS, row, col, radius=radius, labels=labels)
+
         def __str__(self):
             rows, cols = self.shape
             return f"AsciiFrameView(level={self.level}, step={self.step}, shape={rows}x{cols})"
@@ -165,6 +221,12 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             self.frame = after_frame
             self.result = dict(result) if isinstance(result, dict) else {}
 
+        def diff(self, objects=True):
+            return diff_frames(self.before_frame, self.after_frame, objects=objects)
+
+        def track(self, **kwargs):
+            return track_objects(self.before_frame, self.after_frame, **kwargs)
+
         def __str__(self):
             return (
                 "ActionTransitionView("
@@ -174,6 +236,127 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             )
 
         __repr__ = __str__
+
+
+    # One whole `action(...)` call: the frame before the first action through the frame after
+    # the last. `TransitionView` covers a single action, so reading it after a batch shows
+    # only the final step and hides what the earlier actions did.
+    class BatchView:
+        def __init__(self, *, actions, before_frame, after_frame, result, steps):
+            self.actions = list(actions)
+            self.before_frame = before_frame
+            self.after_frame = after_frame
+            self.frame = after_frame
+            self.result = dict(result) if isinstance(result, dict) else {}
+            self.steps = list(steps)
+
+        def diff(self, objects=True):
+            return diff_frames(self.before_frame, self.after_frame, objects=objects)
+
+        def track(self, **kwargs):
+            return track_objects(self.before_frame, self.after_frame, **kwargs)
+
+        def __str__(self):
+            return (
+                "ActionBatchView("
+                f"actions={len(self.actions)}, "
+                f"steps={len(self.steps)}, "
+                f"before_frame={self.before_frame}, "
+                f"after_frame={self.after_frame})"
+            )
+
+        __repr__ = __str__
+
+
+    # Summarize the change from `before` to `after`; None if either frame is missing.
+    # objects=False skips the object-level diff, avoiding segmentation of both frames
+    # when only cell-level changes are needed.
+    def diff_frames(before, after, objects=True):
+        if before is None or after is None:
+            return None
+        return diff_grids(
+            before._grid,
+            after._grid,
+            COLOR_CHARS,
+            before_segmentation=before.segmentation if objects else None,
+            after_segmentation=after.segmentation if objects else None,
+        )
+
+
+    def _background_pixels(frame, background_fraction):
+        rows, cols = frame.shape
+        return int(rows * cols * background_fraction)
+
+
+    # Most likely background color of `frame`, with the evidence behind the call. Pass
+    # other frames to also get how static that color is across them.
+    def find_background(frame, other_frames=(), max_colors=4):
+        if frame is None:
+            return None
+        return identify_background(
+            frame._grid,
+            COLOR_CHARS,
+            segmentation=frame.segmentation,
+            other_grids=[other._grid for other in other_frames if other is not None],
+            max_colors=max_colors,
+        )
+
+
+    # Candidate HUD bars and segmented strips along the frame's edges, plus the interior
+    # region left once they are trimmed off.
+    def find_hud(frame, **kwargs):
+        if frame is None:
+            return None
+        return detect_hud(frame._grid, COLOR_CHARS, frame.segmentation, **kwargs)
+
+
+    # Mirror, rotation, and diagonal symmetry of the frame, or of one region of it.
+    def find_symmetry(frame, bbox=None, ignore_colors=()):
+        if frame is None:
+            return None
+        return detect_symmetry(frame._grid, COLOR_CHARS, bbox=bbox, ignore_colors=ignore_colors)
+
+
+    # Shortest path between two cells of the frame, as directions to act on.
+    def path_between(frame, start, goal, **kwargs):
+        if frame is None:
+            return None
+        return find_path(frame._grid, COLOR_CHARS, start, goal, **kwargs)
+
+
+    # Tally which actions have changed the board and which are proven no-ops. Restricted to
+    # the current level by default, since mechanics change between levels.
+    def _action_effects(transitions, current_frame, level_only=True, **kwargs):
+        level = current_frame.level if current_frame is not None else None
+        records = []
+        for transition in transitions:
+            before = transition.before_frame
+            after = transition.after_frame
+            if level_only and level is not None:
+                if after is not None and after.level != level:
+                    continue
+                if before is not None and before.level != level:
+                    continue
+            records.append(
+                (
+                    transition.action,
+                    before._grid if before is not None else None,
+                    after._grid if after is not None else None,
+                )
+            )
+        return summarize_action_effects(records, COLOR_CHARS, **kwargs)
+
+
+    # Track objects from `before` to `after`, following shape and color changes.
+    def track_objects(before, after, background_fraction=0.25, **kwargs):
+        if before is None or after is None:
+            return None
+        return match_objects(
+            before.segmentation,
+            after.segmentation,
+            background_pixels=_background_pixels(after, background_fraction),
+            **kwargs,
+        )
 
 
     def _frame_from_payload(payload):
@@ -307,6 +490,11 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
         return normalized
 
 
+    def _batch_step_count(runtime_globals):
+        batch = runtime_globals.get("last_batch")
+        return len(batch.steps) if batch is not None else 0
+
+
     def main():
         initial = _recv()
         global COLOR_CHARS
@@ -349,12 +537,19 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             runtime_globals["last_action_frame"] = (
                 last_transition.after_frame if last_transition is not None else None
             )
+            runtime_globals["action_effects"] = (
+                lambda level_only=True, **kwargs: _action_effects(
+                    transitions, current_frame, level_only=level_only, **kwargs
+                )
+            )
             runtime_globals["last_action"] = last_transition.action if last_transition is not None else None
             runtime_globals["valid_actions"] = [str(item) for item in state_payload.get("valid_actions", [])]
             runtime_globals["last_action_result"] = action_result
 
         def action(actions):
             normalized_actions = _normalize_actions(actions)
+            before_frame = runtime_globals.get("current_frame")
+            steps_before = len(runtime_globals.get("transitions") or ())
             _send({"type": "action", "actions": normalized_actions})
             reply = _recv()
             if reply.get("type") == "action_error":
@@ -364,10 +559,55 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             action_result = reply.get("action_result") or {}
             action_results.append(action_result)
             _refresh_state(reply.get("state") or {})
+            transitions = runtime_globals.get("transitions") or []
+            # History is append-only in practice, but if the host ever trims it, fall back to
+            # the frames this batch is known to have produced rather than slicing nonsense.
+            steps = transitions[steps_before:] if len(transitions) >= steps_before else []
+            if not steps:
+                steps = transitions[-len(normalized_actions):] if transitions else []
+            runtime_globals["last_batch"] = BatchView(
+                actions=normalized_actions,
+                before_frame=before_frame,
+                after_frame=runtime_globals.get("current_frame"),
+                result=action_result,
+                steps=steps,
+            )
             return action_result
 
         runtime_globals["action"] = action
+        runtime_globals["diff_frames"] = diff_frames
+        runtime_globals["track_objects"] = track_objects
+        runtime_globals["find_background"] = find_background
+        runtime_globals["find_hud"] = find_hud
+        runtime_globals["find_symmetry"] = find_symmetry
+        runtime_globals["path_between"] = path_between
+        # Only set by `action(...)`, so it always describes a batch from this run of the code.
+        runtime_globals["last_batch"] = None
+        # The one object that outlives this process: whatever is left in it is handed back to
+        # the host and restored on the next call.
+        incoming_notes = initial.get("notes")
+        runtime_globals["notes"] = (
+            dict(incoming_notes) if isinstance(incoming_notes, dict) else {}
+        )
         _refresh_state(initial.get("state") or {})
+
+        # Rebuild the previous call's batch from history so that inspecting without acting still
+        # has it. Without this, `last_batch` is mysteriously None on exactly the turns spent
+        # working out what the last batch did.
+        try:
+            carried_steps = int(initial.get("last_batch_steps") or 0)
+        except (TypeError, ValueError):
+            carried_steps = 0
+        carried_transitions = runtime_globals.get("transitions") or []
+        if carried_steps > 0 and len(carried_transitions) >= carried_steps:
+            batch_steps = carried_transitions[-carried_steps:]
+            runtime_globals["last_batch"] = BatchView(
+                actions=[step.action for step in batch_steps],
+                before_frame=batch_steps[0].before_frame,
+                after_frame=runtime_globals.get("current_frame"),
+                result=runtime_globals.get("last_action_result") or {},
+                steps=batch_steps,
+            )
 
         try:
             compiled = compile(str(initial.get("code", "")), "<python_tool>", "exec")
@@ -379,15 +619,21 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
                     "stdout": stdout.getvalue(),
                     "result": _json_safe(runtime_globals.get("result")),
                     "action_results": _json_safe(action_results),
+                    "notes": _json_safe(runtime_globals.get("notes")),
+                    "last_batch_steps": _batch_step_count(runtime_globals),
                 }
             )
         except Exception as exc:
+            # Notes are returned even on failure: a fact stored before the traceback is still a
+            # fact, and losing it would send the model back to re-deriving it.
             _send(
                 {
                     "type": "error",
                     "error": _sanitize_exception(exc),
                     "stdout": stdout.getvalue(),
                     "action_results": _json_safe(action_results),
+                    "notes": _json_safe(runtime_globals.get("notes")),
+                    "last_batch_steps": _batch_step_count(runtime_globals),
                 }
             )
 
@@ -395,7 +641,10 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
     if __name__ == "__main__":
         main()
     """
-).replace("__SEGMENTATION_SOURCE__\n", inspect.getsource(_segmentation))
+).replace("__SEGMENTATION_SOURCE__\n", inspect.getsource(_segmentation)).replace(
+    "__PERCEPTION_SOURCE__\n",
+    "\n\n".join(_sandbox_source(module) for module in _PERCEPTION_MODULES),
+)
 
 
 def _sanitize_host_error_text(text: str) -> str:
@@ -451,6 +700,8 @@ def run_sandboxed_python(
     timeout_seconds: int,
     initial_state: dict[str, Any],
     action_handler: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    notes: dict[str, Any] | None = None,
+    last_batch_steps: int = 0,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="rgb_python_tool_") as sandbox_dir:
         host_action_results: list[dict[str, Any]] = []
@@ -493,6 +744,8 @@ def run_sandboxed_python(
                 "sandbox_cwd": sandbox_dir,
                 "state": initial_state,
                 "color_chars": ARC_COLOR_CHARS,
+                "notes": dict(notes) if isinstance(notes, dict) else {},
+                "last_batch_steps": max(0, int(last_batch_steps or 0)),
             },
         )
 
@@ -561,11 +814,18 @@ def run_sandboxed_python(
 
             if msg_type in {"final", "error"}:
                 _wait_for_process_exit(process)
+                returned_notes = message.get("notes")
+                try:
+                    returned_batch_steps = max(0, int(message.get("last_batch_steps") or 0))
+                except (TypeError, ValueError):
+                    returned_batch_steps = 0
                 return {
                     "stdout": str(message.get("stdout", "") or ""),
                     "result": message.get("result"),
                     "error": str(message.get("error", "") or ""),
                     "action_results": list(message.get("action_results") or host_action_results),
+                    "notes": returned_notes if isinstance(returned_notes, dict) else None,
+                    "last_batch_steps": returned_batch_steps,
                 }
 
             _wait_for_process_exit(process)

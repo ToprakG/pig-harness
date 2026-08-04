@@ -31,6 +31,8 @@ from inference.agent.vision_context import (
 
 from inference.agent.python_tool_sandbox import run_sandboxed_python
 from inference.agent.runtime_state import Frame, HistoryEntry, RUNTIME_STATE_FILENAME, load_runtime_state
+from inference.perception import summarize_action_effects
+from inference.utils.grid_utils import ARC_COLOR_CHARS
 from inference.utils.openai_compat import build_chat_payload, build_headers
 
 log = logging.getLogger(__name__)
@@ -50,6 +52,8 @@ _TOOL_CALL_PARAMETER_RE = re.compile(
     flags=re.DOTALL | re.IGNORECASE,
 )
 _THINK_TAG_RE = re.compile(r"</?think>", flags=re.IGNORECASE)
+_NOTES_CHAR_LIMIT = 4000
+_CROSS_LEVEL_NOTES_KEY = "cross_level"
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -955,6 +959,8 @@ class ToolAgent:
         self._last_step_summary: dict[str, Any] | None = None
         self._last_action_result: dict[str, Any] | None = None
         self._summarized_knowledge = _empty_world_model()
+        self._notes: dict[str, Any] = {}
+        self._last_batch_steps = 0
 
     def _headers(self) -> dict[str, str]:
         api_key = (
@@ -983,6 +989,8 @@ class ToolAgent:
             self._last_step_summary = None
             self._last_action_result = None
             self._summarized_knowledge = _empty_world_model()
+            self._notes = {}
+            self._last_batch_steps = 0
 
     @property
     def total_tokens(self) -> int:
@@ -1103,6 +1111,89 @@ class ToolAgent:
             pieces.append(f"stop_reason={stop_reason}.")
         return " ".join(pieces)
 
+    def _dead_action_lines(
+        self,
+        history_entries: list[HistoryEntry],
+        current_level: int,
+    ) -> list[str]:
+        """State the no-op evidence outright instead of waiting to be asked for it.
+
+        `action_effects()` is available in the sandbox but goes unused, and the cost of that is
+        paid in repeated actions that have never once changed the board. This is the same tally,
+        computed from the level's own history and put in front of the model every turn.
+        """
+        records: list[tuple[str, Any, Any]] = []
+        previous_grid = None
+        previous_level = None
+        for entry in history_entries:
+            frame = entry.frame
+            if frame is None:
+                continue
+            grid = [list(row) for row in frame.grid]
+            action = str(entry.action or "").strip()
+            if action and previous_grid is not None and previous_level == frame.level == current_level:
+                records.append((action, previous_grid, grid))
+            previous_grid = grid
+            previous_level = frame.level
+        if not records:
+            return []
+        try:
+            effects = summarize_action_effects(records, ARC_COLOR_CHARS)
+        except Exception:  # noqa: BLE001
+            return []
+        dead_actions = [str(item) for item in effects.get("dead_actions") or []]
+        dead_targets = [str(item) for item in effects.get("dead_click_targets") or []]
+        if not dead_actions and not dead_targets:
+            return []
+        lines = ["Proven no-ops on this level, measured from your own action history:"]
+        if dead_actions:
+            lines.append(f"- Actions that have never changed the board: {', '.join(dead_actions)}.")
+        if dead_targets:
+            lines.append(
+                f"- Click targets that have never changed the board: {', '.join(dead_targets)}."
+            )
+        try:
+            wasted = int(effects.get("wasted_actions") or 0)
+        except (TypeError, ValueError):
+            wasted = 0
+        if wasted:
+            lines.append(
+                f"- {wasted} actions have already gone into those. Do not spend more on them; "
+                "they will not start working."
+            )
+        return lines
+
+    def _store_notes(self, returned_notes: Any) -> str:
+        """Persist the sandbox `notes` dict for the next Python call.
+
+        Rejects the whole update when it grows past the budget rather than silently dropping
+        keys, so the model is told to prune instead of quietly losing a fact it thinks it saved.
+        """
+        if not isinstance(returned_notes, dict):
+            return ""
+        try:
+            serialized = json.dumps(returned_notes, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return "notes were not JSON-serializable and were not saved."
+        if len(serialized) > _NOTES_CHAR_LIMIT:
+            return (
+                f"notes were {len(serialized)} chars, over the {_NOTES_CHAR_LIMIT}-char budget, "
+                "and were not saved; store fewer or smaller entries."
+            )
+        self._notes = json.loads(serialized)
+        return ""
+
+    def _notes_lines(self) -> list[str]:
+        if not self._notes:
+            return []
+        try:
+            rendered = json.dumps(self._notes, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return []
+        return [
+            f"- Stored notes (persist across turns, readable as the `notes` dict in Python): {rendered}",
+        ]
+
     def _update_summarized_knowledge_from_assistant(self, content: str) -> None:
         note = _extract_scientist_note(content)
         if not note:
@@ -1125,6 +1216,13 @@ class ToolAgent:
                 "current_plan",
             ):
                 self._summarized_knowledge[key] = ""
+            # Stored coordinates and per-object findings describe the level that just ended, so
+            # they are cleared alongside it; only what the model marked as cross-level survives.
+            self._notes = {
+                key: value
+                for key, value in self._notes.items()
+                if key == _CROSS_LEVEL_NOTES_KEY
+            }
 
     def _summarized_knowledge_lines(self) -> list[str]:
         entries = [
@@ -1137,6 +1235,7 @@ class ToolAgent:
             ("Cross-level notes", self._summarized_knowledge.get("cross_level_notes", "")),
         ]
         lines = [f"- {label}: {value}" for label, value in entries if value]
+        lines.extend(self._notes_lines())
         if not lines:
             return []
         return [
@@ -1221,10 +1320,13 @@ class ToolAgent:
             [
                 state_line,
                 f"Valid actions right now: {_format_valid_action_line(valid_actions)}.",
-                "Only tool: `python`. It receives `current_frame`, `previous_frame`, `history`, `transitions`, `last_transition`, `valid_actions`, `last_action_result`, and `action(actions)`.",
+                "Only tool: `python`. It receives `current_frame`, `previous_frame`, `history`, `transitions`, `last_transition`, `last_batch`, `valid_actions`, `last_action_result`, and `action(actions)`.",
                 "Only letter-coded board views and lightweight metadata are exposed; raw numeric color IDs are not available.",
                 "Keep tool output compact: use `current_frame.segmentation` as the primary view, and `current_frame.ascii` only for a small specific region; never print full boards.",
                 "For the most recent change, compare `previous_frame` to `current_frame`, or `last_transition.before_frame` to `last_transition.after_frame`; `history[-1].frame` is the current frame, not the previous one.",
+                "When one `action(...)` call carries several actions, `last_transition` is only the last of them: judge the call with `last_batch.diff()`, and never toggle a state back inside the same batch you are trying to measure.",
+                "`notes` is a dict that persists across calls and turns. Write down each coordinate you locate and each action effect you confirm or rule out, then read it back instead of re-deriving the same facts from `segmentation` every turn.",
+                "Before you repeat an action or click another object of a kind you have already tried, call `action_effects()` and drop everything it reports as `dead`. Wasted actions are scored against you, and an action that has never changed the board will not start now.",
                 "Use Python to inspect the evidence, refine that world model from the newest history, and search or score candidate actions or short sequences against the current goal as you currently understand it.",
                 "Maintain a compact working world model of what the current level seems to contain, what actions appear to do, what the goal seems to be, what is still uncertain, and what plan currently looks best.",
                 "Below you are provided with the current world model from the previous turn. The default behavior is to copy it and add or remove things based on the evidence that you gathered. BEFORE EXECUTING NEW ACTIONS YOU MUST ALWAYS GIVE THE REVISED VERSION OF THE WORLD MODEL.",
@@ -1235,6 +1337,14 @@ class ToolAgent:
             "but stop immediately if a result reports `game_over`, `run_complete`, `level_completed`, or `done`."
         )
         lines.extend(self._summarized_knowledge_lines())
+        if not self._notes and action_num > 0:
+            # An empty store is invisible, so it never gets a first write; say it is empty.
+            lines.append(
+                "Stored notes are empty. Put the coordinates you have located and the action "
+                "effects you have confirmed or ruled out into the `notes` dict this turn, so "
+                "later turns read them instead of re-deriving them from `segmentation`."
+            )
+        lines.extend(self._dead_action_lines(history_entries, current_level))
         lines.append("end of world model. ")
         if action_num == 0:
             lines.append(
@@ -1550,7 +1660,14 @@ class ToolAgent:
             timeout_seconds=self._python_timeout,
             initial_state=_serialized_runtime_state(),
             action_handler=_handle_action,
+            notes=self._notes,
+            last_batch_steps=self._last_batch_steps,
         )
+        notes_error = self._store_notes(sandbox_result.get("notes"))
+        try:
+            self._last_batch_steps = max(0, int(sandbox_result.get("last_batch_steps") or 0))
+        except (TypeError, ValueError):
+            self._last_batch_steps = 0
 
         action_results = [
             item
@@ -1578,6 +1695,9 @@ class ToolAgent:
                         "action_calls": len(action_results),
                         "last_action_result": action_results[-1],
                     }
+
+        if notes_error:
+            payload["notes_error"] = notes_error
 
         step_executed = any(bool(item.get("executed")) for item in action_results)
         if step_executed:
