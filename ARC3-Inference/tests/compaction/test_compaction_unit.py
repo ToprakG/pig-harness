@@ -128,3 +128,56 @@ def test_stats_summary_line():
                             compaction_wallclock_s=3.5)
     line = stats.summary_line(digest_tokens=123)
     assert "events=2" in line and "fallbacks=1" in line and "digest_tokens=123" in line
+
+
+def test_agent_compaction_call_handles_thinking_models(monkeypatch):
+    """Empty content + populated reasoning_content must still yield a digest,
+    and the prompt must carry the /no_think soft switch."""
+    import json as json_module
+    from types import SimpleNamespace
+
+    from inference.agent.tool_agent import ToolAgent
+
+    agent = ToolAgent(model="t", base_url="http://stub.invalid/v1",
+                      provider="deepinfra", api_key="t")
+    seen = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen["prompt"] = json["messages"][0]["content"]
+        body = {"choices": [{"message": {"role": "assistant", "content": "",
+                                          "reasoning_content": "- digest from reasoning"},
+                              "finish_reason": "length"}]}
+        return SimpleNamespace(status_code=200, text=json_module.dumps(body),
+                               json=lambda: body, raise_for_status=lambda: None)
+
+    monkeypatch.setattr("inference.agent.tool_agent.requests.post", fake_post)
+    out = agent._compaction_llm_call("summarize this", 900, 20.0)
+    assert out == "- digest from reasoning"
+    assert seen["prompt"].endswith("/no_think")
+
+
+def test_agent_batches_small_drops_into_one_compaction(monkeypatch):
+    """Drops below the threshold accumulate; crossing it fires ONE call
+    carrying all pending blocks."""
+    from inference.agent.compaction import CompactionConfig
+    from inference.agent.tool_agent import ToolAgent
+
+    agent = ToolAgent(model="t", base_url="http://stub.invalid/v1",
+                      provider="vllm", api_key="t")
+    agent._compaction_config = CompactionConfig(
+        enabled=True, min_dropped_tokens_to_compact=300)
+    calls = []
+    monkeypatch.setattr(
+        agent, "_compaction_llm_call",
+        lambda prompt, mt, ts: calls.append(prompt) or "- merged digest")
+
+    small = [{"role": "user", "content": "EARLY-FACT " + "x" * 200}]
+    agent._compact_dropped(small)          # ~70 tokens: buffered, no call
+    assert calls == [] and len(agent._compaction_pending) == 1
+
+    agent._compact_dropped(
+        [{"role": "user", "content": "LATE-FACT " + "y" * 800}])
+    assert len(calls) == 1                  # threshold crossed: one call
+    assert "EARLY-FACT" in calls[0] and "LATE-FACT" in calls[0]
+    assert agent._compaction_pending == []  # buffer flushed
+    assert agent._history_digest.text == "- merged digest"

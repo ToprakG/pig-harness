@@ -43,12 +43,24 @@ off the back of the context).
 
 ## 3. Expected overhead
 
-With drops batched per trim invocation, compaction adds roughly one small
-call per post-saturation step: ≈ 40 calls/run upper bound. At ~2–5 s per
-900-token call this is ~1.5–3.5 min of a 45-min run (3–8 % wall-clock);
-`min_dropped_tokens_to_compact` and the single-call-per-trim batching keep
-it at the low end. The A/B (Section 5) measures the real cost — wall-clock
-inside compaction is logged per run.
+Dropped blocks accumulate in a pending buffer and are compacted in **one
+call per `min_dropped_tokens_to_compact` worth of content** (nothing is
+lost while buffered). On the reference vLLM backend, where
+`enable_thinking:false` is honored, a 900-token call takes seconds and the
+default threshold (800) yields ≈ one call per post-saturation step:
+~40 calls/run upper bound ≈ 1.5–3.5 min of a 45-min run (3–8 % wall-clock).
+
+**Thinking-model caveat (measured live on DeepInfra + Qwen3.6-27B):** where
+the provider cannot disable thinking (`chat_template_kwargs` rejected), the
+model spends ~1.5k tokens reasoning before emitting the digest — a
+completed call needs ~1.9k completion tokens and ~55 s; the `/no_think`
+soft switch is ignored. `_compaction_llm_call` therefore falls back to the
+reasoning text when content is empty, and deployments on such providers
+should raise the batching threshold and call budget, e.g.
+`{"compaction_call_max_tokens": 2500, "compaction_timeout_s": 75,
+"min_dropped_tokens_to_compact": 9000}` ⇒ ~5–8 calls/run ≈ 5–7 min. The
+A/B (Section 5) measures the real cost — wall-clock inside compaction is
+logged per run.
 
 ## 4. Instrumentation (C4)
 

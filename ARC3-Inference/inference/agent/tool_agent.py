@@ -19,6 +19,7 @@ from inference.agent.compaction import (
     CompactionStats,
     HistoryDigest,
     compact as _compact_history,
+    render_dropped_messages as _render_dropped_messages,
 )
 from inference.agent.prompts import (
     COMPACT_TOOL_SESSION_ADDENDUM,
@@ -984,6 +985,7 @@ class ToolAgent:
             estimate_tokens=_estimate_tokens,
         )
         self._compaction_stats = CompactionStats()
+        self._compaction_pending: list[dict[str, Any]] = []
 
     def _headers(self) -> dict[str, str]:
         api_key = (
@@ -1022,6 +1024,7 @@ class ToolAgent:
             # transitions (cross-level knowledge is the point of it)
             self._history_digest.clear()
             self._compaction_stats = CompactionStats()
+            self._compaction_pending = []
 
     @property
     def total_tokens(self) -> int:
@@ -1750,12 +1753,24 @@ class ToolAgent:
         return [system_message, *history]
 
     def _compact_dropped(self, dropped: list[dict[str, Any]]) -> None:
-        """C1 hook: route an about-to-be-dropped block into the digest."""
+        """C1 hook: route an about-to-be-dropped block into the digest.
+
+        Blocks accumulate in a pending buffer and are compacted in one call
+        once they reach ``min_dropped_tokens_to_compact`` — this keeps
+        compaction calls rare on slow providers while losing nothing (the
+        pending buffer holds the dropped content until it is summarized).
+        """
         cfg = self._compaction_config
         if not cfg.enabled or not dropped:
             return
+        self._compaction_pending.extend(dropped)
+        pending_text = _render_dropped_messages(self._compaction_pending)
+        if _estimate_tokens(pending_text) < cfg.min_dropped_tokens_to_compact:
+            return
+        pending = self._compaction_pending
+        self._compaction_pending = []
         _compact_history(
-            dropped,
+            pending,
             self._history_digest,
             self._compaction_llm_call,
             config=cfg,
@@ -1765,11 +1780,17 @@ class ToolAgent:
 
     def _compaction_llm_call(self, prompt: str, max_tokens: int,
                              timeout_s: float) -> str:
-        """One small chat call on the analyzer's own endpoint/client."""
+        """One small chat call on the analyzer's own endpoint/client.
+
+        Thinking models can burn the whole reply budget inside reasoning and
+        return an empty ``content``: the Qwen3 ``/no_think`` soft switch
+        suppresses that where the provider honors it, and the reasoning text
+        doubles as a fallback source for the digest where it does not.
+        """
         payload = build_chat_payload(
             provider=self._model.provider,
             model=self._model.model_id,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": f"{prompt}\n/no_think"}],
             max_tokens=max_tokens,
             temperature=_COMPACTION_TEMPERATURE,
             top_p=_LOCAL_ANALYZER_TOP_P,
@@ -1787,7 +1808,11 @@ class ToolAgent:
         choices = data.get("choices") or []
         if not choices:
             raise requests.RequestException("compaction call returned no choices")
-        return _normalize_message_content(choices[0].get("message", {}).get("content", ""))
+        message = choices[0].get("message", {})
+        content = _normalize_message_content(message.get("content", ""))
+        if content:
+            return content
+        return _extract_reasoning_text(message)
 
     def _force_reduce_messages(
         self,
