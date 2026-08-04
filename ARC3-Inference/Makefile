@@ -108,7 +108,7 @@ KAGGLE_VLLM_REASONING_PARSER ?= $(shell $(CONFIG_VALUE) kaggle.reasoning_parser 
 KAGGLE_VLLM_MAX_MODEL_LEN ?= $(shell $(CONFIG_VALUE) kaggle.max_model_len $(SERVER_MAX_MODEL_LEN))
 KAGGLE_VLLM_QUANTIZATION ?= $(shell $(CONFIG_VALUE) kaggle.quantization $(SERVER_QUANTIZATION))
 KAGGLE_VLLM_TRUST_REMOTE_CODE ?= $(shell $(CONFIG_VALUE) kaggle.trust_remote_code $(SERVER_TRUST_REMOTE_CODE))
-KAGGLE_VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS ?= $(shell $(CONFIG_VALUE) kaggle.default_chat_template_kwargs $(SERVER_DEFAULT_CHAT_TEMPLATE_KWARGS))
+KAGGLE_VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS ?= $(shell $(CONFIG_VALUE) kaggle.default_chat_template_kwargs '$(SERVER_DEFAULT_CHAT_TEMPLATE_KWARGS)')
 
 SERVER_BACKEND ?= $(shell $(CONFIG_VALUE) server.backend vllm)
 SERVER_HOST ?= $(shell $(CONFIG_VALUE) server.host 127.0.0.1)
