@@ -195,7 +195,7 @@ def expected_score(pool, policy, budget, partial_credit) -> float:
     memo: dict = {}
 
     def rec(spent, fails, restarts, idx):
-        # attempt index only shapes the policy for luby's schedule
+        # attempt index only matters for luby's schedule
         key = (spent, fails, restarts, idx if policy["kind"] == "luby" else 0)
         if key in memo:
             return memo[key]
