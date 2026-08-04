@@ -112,3 +112,31 @@ Not: mutlak skorlar duck'ın yayınladığından çok düşük (ft09 için onlar
 diyor, biz 0.00). İki sebep: 10 dk/oyun bütçe (onlar 45 dk) ve farklı model
 (gpt-oss-120b vs Qwen3.6-27B-FP8). Bu A/B mutlak skoru değil, iki kol
 arasındaki FARKI ölçmek için kuruldu.
+
+## A/B #2 GEÇERSİZ — kök neden: zaman aşımı çöküşü
+
+20 koşuluk "off" kolu 3 sa 8 dk sürdü ve **hepsi 0** aldı. Transkriptlerde
+**5.953 istek hatası**, bunların 5.788'i:
+
+```
+request_error: HTTPSConnectionPool(host='api.cerebras.ai', port=443):
+Read timed out. (read timeout=0.1)
+```
+
+`inference/framework/solver.py:227` `request_timeout_seconds()` istek zaman
+aşımını şu üçünün **minimumu** olarak alıyor: yapılandırılmış timeout,
+oyunun kalan süresi, soft kalan süre. `max_runtime_minutes=10` ile sınıra
+yaklaşıldığında timeout 0.1 saniyeye çöküyor ve sonraki her istek anında
+başarısız oluyor. Ajan döngüde kalıp bütçeyi ölü isteklerle yakıyor.
+
+Sonuç: koşu başına medyan **35 aksiyon** (ft09'un L1 insan baseline'ı 43).
+Ajan seviye 1'i bitirmeye fiziksel olarak yetişemiyor → skor her koşuda 0
+garantili. **Bu düzenekte compaction farkı ölçülemez.**
+
+Duck'ın kendi varsayılanı `max_runtime_minutes: 45`. Benim 10 dakikam,
+üretken pencereyi ölü zamanın altında bıraktı. A/B #1 de (10 dk) aynı
+sebeple şüpheli — oradaki tek 1.19'luk pass muhtemelen gürültü.
+
+**Düzeltme:** süreyi 30-45 dk'ya çıkar, eşzamanlılığı düşür (her koşu daha
+çok istek payı alsın), pass sayısını azalt. Uzun koşu zaten şart: compaction
+ancak bağlam dolunca devreye giriyor.
