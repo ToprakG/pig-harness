@@ -14,6 +14,12 @@ from urllib.parse import urlparse, urlunparse
 import requests
 
 from inference.agent.action_names import to_engine_action, to_model_action
+from inference.agent.compaction import (
+    CompactionConfig,
+    CompactionStats,
+    HistoryDigest,
+    compact as _compact_history,
+)
 from inference.agent.prompts import (
     COMPACT_TOOL_SESSION_ADDENDUM,
     GAME_OVERVIEW_ADDENDUM,
@@ -457,6 +463,23 @@ def _format_action_span(start_action_num: int | None, end_action_num: int | None
     if start_action_num == end_action_num:
         return f"{start_action_num}"
     return f"{start_action_num}-{end_action_num}"
+
+
+_COMPACTION_TEMPERATURE = 0.2
+
+
+def _load_compaction_config() -> CompactionConfig:
+    """Read the compaction block passed via the COMPACTION_CONFIG env var
+    (JSON, exported by the Makefile from configs/inference.json)."""
+    raw = os.environ.get("COMPACTION_CONFIG", "").strip()
+    if not raw:
+        return CompactionConfig()
+    try:
+        return CompactionConfig.from_dict(json.loads(raw))
+    except (ValueError, TypeError):
+        logging.getLogger(__name__).warning(
+            "invalid COMPACTION_CONFIG JSON; compaction disabled")
+        return CompactionConfig()
 
 
 def _estimate_tokens(value: Any) -> int:
@@ -955,6 +978,12 @@ class ToolAgent:
         self._last_step_summary: dict[str, Any] | None = None
         self._last_action_result: dict[str, Any] | None = None
         self._summarized_knowledge = _empty_world_model()
+        self._compaction_config = _load_compaction_config()
+        self._history_digest = HistoryDigest(
+            self._compaction_config.digest_max_tokens,
+            estimate_tokens=_estimate_tokens,
+        )
+        self._compaction_stats = CompactionStats()
 
     def _headers(self) -> dict[str, str]:
         api_key = (
@@ -977,6 +1006,11 @@ class ToolAgent:
     def _ensure_session(self, state_path: Path) -> None:
         runtime_dir = state_path.parent
         if self._session_runtime_dir != runtime_dir:
+            if self._compaction_config.enabled and self._session_runtime_dir is not None:
+                # per-run instrumentation summary (C4)
+                logging.getLogger(__name__).info(
+                    self._compaction_stats.summary_line(self._history_digest.tokens())
+                )
             self._session_runtime_dir = runtime_dir
             self._history_messages = []
             self._session_total_tokens = 0
@@ -984,6 +1018,10 @@ class ToolAgent:
             self._last_step_summary = None
             self._last_action_result = None
             self._summarized_knowledge = _empty_world_model()
+            # the digest is wiped only on a NEW GAME — never on level
+            # transitions (cross-level knowledge is the point of it)
+            self._history_digest.clear()
+            self._compaction_stats = CompactionStats()
 
     @property
     def total_tokens(self) -> int:
@@ -1116,7 +1154,15 @@ class ToolAgent:
         summary = self._last_step_summary
         if not summary:
             return
-        if summary.get("level_transition") or summary.get("run_complete") or summary.get("game_over"):
+        # split of the original single wipe condition, gated by config —
+        # defaults (both flags true) reproduce upstream behavior exactly
+        cfg = self._compaction_config
+        wipe = bool(summary.get("run_complete"))
+        if summary.get("level_transition") and cfg.wipe_knowledge_on_level_transition:
+            wipe = True
+        if summary.get("game_over") and cfg.wipe_knowledge_on_reset:
+            wipe = True
+        if wipe:
             for key in (
                 "world_model",
                 "goal_model",
@@ -1236,6 +1282,9 @@ class ToolAgent:
             "but stop immediately if a result reports `game_over`, `run_complete`, `level_completed`, or `done`."
         )
         lines.extend(self._summarized_knowledge_lines())
+        if self._compaction_config.enabled:
+            # guaranteed layer underneath the self-reported scientist notes
+            lines.extend(self._history_digest.render_lines())
         lines.append("end of world model. ")
         if action_num == 0:
             lines.append(
@@ -1607,21 +1656,26 @@ class ToolAgent:
             payload["tool_choice"] = _request_tool_choice(tools)
         return _estimate_tokens(payload)
 
-    def _drop_oldest_history_block(self, history: list[dict[str, Any]], *, preserve_recent: int) -> bool:
+    def _drop_oldest_history_block(self, history: list[dict[str, Any]], *, preserve_recent: int) -> list[dict[str, Any]]:
+        """Pop the oldest history block; returns the dropped messages.
+
+        The empty list is falsy, preserving the old boolean contract for
+        callers; the returned block feeds compaction when enabled.
+        """
         removable = len(history) - preserve_recent
         if removable <= 0:
-            return False
-        first = history.pop(0)
-        first_role = str(first.get("role", "")).strip()
+            return []
+        dropped = [history.pop(0)]
+        first_role = str(dropped[0].get("role", "")).strip()
         if first_role in {"assistant", "tool"}:
             while history and history[0].get("role") == "tool" and len(history) > preserve_recent:
-                history.pop(0)
-            return True
+                dropped.append(history.pop(0))
+            return dropped
         while history and history[0].get("role") == "tool" and len(history) > preserve_recent:
-            history.pop(0)
+            dropped.append(history.pop(0))
         while history and history[0].get("role") != "user" and len(history) > preserve_recent:
-            history.pop(0)
-        return True
+            dropped.append(history.pop(0))
+        return dropped
 
     def _keep_recent_history_turns(
         self,
@@ -1685,11 +1739,55 @@ class ToolAgent:
         history = list(messages[1:])
         preserve_recent = max(0, preserve_recent)
         budget_tokens = max(1, self._context_budget_tokens - max(0, extra_safety_tokens))
+        dropped_blocks: list[dict[str, Any]] = []
         while history and self._estimate_request_input_tokens([system_message, *history], tools=tools) > budget_tokens:
-            if not self._drop_oldest_history_block(history, preserve_recent=preserve_recent):
+            dropped = self._drop_oldest_history_block(history, preserve_recent=preserve_recent)
+            if not dropped:
                 break
+            dropped_blocks.extend(dropped)
         history = self._drop_until_first_user_message(history)
+        self._compact_dropped(dropped_blocks)
         return [system_message, *history]
+
+    def _compact_dropped(self, dropped: list[dict[str, Any]]) -> None:
+        """C1 hook: route an about-to-be-dropped block into the digest."""
+        cfg = self._compaction_config
+        if not cfg.enabled or not dropped:
+            return
+        _compact_history(
+            dropped,
+            self._history_digest,
+            self._compaction_llm_call,
+            config=cfg,
+            stats=self._compaction_stats,
+            estimate_tokens=_estimate_tokens,
+        )
+
+    def _compaction_llm_call(self, prompt: str, max_tokens: int,
+                             timeout_s: float) -> str:
+        """One small chat call on the analyzer's own endpoint/client."""
+        payload = build_chat_payload(
+            provider=self._model.provider,
+            model=self._model.model_id,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=_COMPACTION_TEMPERATURE,
+            top_p=_LOCAL_ANALYZER_TOP_P,
+            top_k=0,
+            thinking=False,
+        )
+        response = requests.post(
+            f"{self._model.base_url.rstrip('/')}/chat/completions",
+            headers=self._headers(),
+            json=payload,
+            timeout=timeout_s,
+        )
+        response.raise_for_status()
+        data = response.json()
+        choices = data.get("choices") or []
+        if not choices:
+            raise requests.RequestException("compaction call returned no choices")
+        return _normalize_message_content(choices[0].get("message", {}).get("content", ""))
 
     def _force_reduce_messages(
         self,
@@ -1701,8 +1799,10 @@ class ToolAgent:
             return []
         system_message = messages[0]
         history = list(messages[1:])
-        if not self._drop_oldest_history_block(history, preserve_recent=max(0, preserve_recent)):
+        dropped = self._drop_oldest_history_block(history, preserve_recent=max(0, preserve_recent))
+        if not dropped:
             return list(messages)
+        self._compact_dropped(dropped)
         return [system_message, *history]
 
     def analyze(
@@ -2029,6 +2129,22 @@ class ToolAgent:
         else:
             status_message = "No action(...) call was captured."
 
+        if self._compaction_config.enabled:
+            # per-step instrumentation (C4): cumulative counters + token gauges
+            prompt_tokens_est = (
+                self._estimate_request_input_tokens(
+                    latest_request_messages, tools=latest_request_tools)
+                if latest_request_messages is not None else 0
+            )
+            append_transcript(
+                "COMPACTION",
+                f"compaction_events: {self._compaction_stats.compaction_events}\n"
+                f"compaction_fallbacks: {self._compaction_stats.compaction_fallbacks}\n"
+                f"digest_tokens: {self._history_digest.tokens()}\n"
+                f"prompt_tokens: {prompt_tokens_est}\n"
+                f"generated_tokens: {self._session_generated_tokens}\n"
+                f"compaction_wallclock_s: {self._compaction_stats.compaction_wallclock_s:.2f}",
+            )
         status = (
             f"model: {self._model.model_id}\n"
             f"base_url: {self._model.base_url}\n"
