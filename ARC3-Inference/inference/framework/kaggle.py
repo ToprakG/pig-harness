@@ -9,7 +9,10 @@ from inference.utils.openai_compat import normalize_provider
 
 DEFAULT_VLLM_WHEELHOUSE_DATASET_SOURCE = "driessmit1/arc3-vllm-h100-wheelhouse-v3"
 DEFAULT_QWEN_MODEL_DATASET_SOURCE = "driessmit1/vrfai-qwen3-6-27b-fp8-hf-snapshot"
+DEFAULT_GEMMA_MODEL_DATASET_SOURCE = "driessmit1/vrfai-gemma-4-31b-it-fp8-hf-snapshot"
 DEFAULT_SERVED_MODEL_NAME = "vrfai/Qwen3.6-27B-FP8"
+DEFAULT_GEMMA_SERVED_MODEL_NAME = "vrfai/gemma-4-31B-it-fp8"
+DEFAULT_GEMMA_MODEL_HF_REPO = "vrfai/gemma-4-31B-it-fp8"
 DEFAULT_VLLM_PORT = 1234
 DEFAULT_VLLM_MAX_MODEL_LEN = 65536
 DEFAULT_VLLM_TENSOR_PARALLEL_SIZE = 1
@@ -53,38 +56,54 @@ class DuckKaggleVllmConfig:
     wheelhouse_dataset_source: str = DEFAULT_VLLM_WHEELHOUSE_DATASET_SOURCE
     model_dataset_source: str = DEFAULT_QWEN_MODEL_DATASET_SOURCE
     served_model_name: str = DEFAULT_SERVED_MODEL_NAME
+    model_hf_repo: str = ""
     vllm_port: int = DEFAULT_VLLM_PORT
     max_model_len: int = DEFAULT_VLLM_MAX_MODEL_LEN
     tensor_parallel_size: int = DEFAULT_VLLM_TENSOR_PARALLEL_SIZE
     wheelhouse_stamp_text: str = DEFAULT_WHEELHOUSE_STAMP_TEXT
+    tool_call_parser: str = "qwen3_coder"
+    reasoning_parser: str = "qwen3"
+    quantization: str = ""
+    trust_remote_code: bool = False
+    default_chat_template_kwargs: dict[str, object] | None = None
+
+
+def _analyzer_provider() -> str:
+    return normalize_provider(os.environ.get("LOCAL_ANALYZER_PROVIDER", "vllm"))
+
+
+def _kaggle_uses_vllm() -> bool:
+    return _analyzer_provider() == "vllm"
 
 
 def duck_kaggle_dataset_sources(
     config: DuckKaggleVllmConfig | None = None,
 ) -> list[str]:
+    if not _kaggle_uses_vllm():
+        return []
     cfg = config or DuckKaggleVllmConfig()
-    return [cfg.wheelhouse_dataset_source, cfg.model_dataset_source]
+    sources = [cfg.wheelhouse_dataset_source]
+    if str(cfg.model_dataset_source or "").strip():
+        sources.append(cfg.model_dataset_source)
+    return sources
 
 
 def duck_kaggle_setup_command(config: DuckKaggleVllmConfig | None = None) -> str:
+    if not _kaggle_uses_vllm():
+        return duck_kaggle_remote_setup_command()
     cfg = config or DuckKaggleVllmConfig()
     wheelhouse_owner, wheelhouse_slug = _split_dataset_source(
         cfg.wheelhouse_dataset_source,
         option_name="wheelhouse_dataset_source",
     )
-    model_owner, model_slug = _split_dataset_source(
-        cfg.model_dataset_source,
-        option_name="model_dataset_source",
-    )
-    # Base URL / model are pinned to the local vLLM server below, so reject a
-    # provider that disagrees (e.g. openrouter) — it would drop vLLM-only payload
-    # fields (top_k, chat_template_kwargs) against a vLLM endpoint.
-    analyzer_provider = os.environ.get("LOCAL_ANALYZER_PROVIDER", "vllm")
-    if normalize_provider(analyzer_provider) != "vllm":
-        raise ValueError(
-            f"kaggle-duck runs a local vLLM server, so LOCAL_ANALYZER_PROVIDER must be "
-            f"vLLM/OpenAI-compatible, got {analyzer_provider!r}."
+    model_source = str(cfg.model_dataset_source or "").strip()
+    if model_source:
+        model_owner, model_slug = _split_dataset_source(
+            model_source,
+            option_name="model_dataset_source",
         )
+    else:
+        model_owner, model_slug = "", ""
     replacements = {
         "__WHEELHOUSE_OWNER__": repr(wheelhouse_owner),
         "__WHEELHOUSE_SLUG__": repr(wheelhouse_slug),
@@ -105,7 +124,7 @@ def duck_kaggle_setup_command(config: DuckKaggleVllmConfig | None = None) -> str
         # so the rendered setup_env on Kaggle reflects JSON edits. Fallback
         # equals the historical hardcoded literal so direct kaggle.py callers
         # outside Make are unaffected.
-        "__LOCAL_ANALYZER_PROVIDER__": repr(analyzer_provider),
+        "__LOCAL_ANALYZER_PROVIDER__": repr(_analyzer_provider()),
         "__LOCAL_ANALYZER_APP_NAME__": repr(os.environ.get("LOCAL_ANALYZER_APP_NAME", "ARC3 Kaggle Harness")),
         "__LOCAL_ANALYZER_MAX_OUTPUT__": repr(os.environ.get("LOCAL_ANALYZER_MAX_OUTPUT", "0")),
         "__LOCAL_ANALYZER_TOOL_STEPS__": repr(os.environ.get("LOCAL_ANALYZER_TOOL_STEPS", "0")),
@@ -120,6 +139,12 @@ def duck_kaggle_setup_command(config: DuckKaggleVllmConfig | None = None) -> str
         "__MULTIMODAL_UPSCALE__": repr(os.environ.get("MULTIMODAL_UPSCALE", "4")),
         "__VLLM_TENSOR_PARALLEL_SIZE__": repr(int(cfg.tensor_parallel_size)),
         "__WHEELHOUSE_STAMP_TEXT__": repr(cfg.wheelhouse_stamp_text),
+        "__VLLM_TOOL_CALL_PARSER__": repr(cfg.tool_call_parser),
+        "__VLLM_REASONING_PARSER__": repr(cfg.reasoning_parser),
+        "__VLLM_QUANTIZATION__": repr(cfg.quantization),
+        "__VLLM_TRUST_REMOTE_CODE__": repr(bool(cfg.trust_remote_code)),
+        "__VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS__": repr(cfg.default_chat_template_kwargs),
+        "__KAGGLE_MODEL_HF_REPO__": repr(cfg.model_hf_repo),
     }
     script = _DUCK_VLLM_SETUP_SCRIPT
     for placeholder, value in replacements.items():
@@ -128,7 +153,63 @@ def duck_kaggle_setup_command(config: DuckKaggleVllmConfig | None = None) -> str
 
 
 def duck_kaggle_teardown_command() -> str:
+    if not _kaggle_uses_vllm():
+        return ""
     return f"\"$PYTHON\" - <<'PYTEARDOWN'\n{_DUCK_VLLM_TEARDOWN_SCRIPT}\nPYTEARDOWN"
+
+
+def duck_kaggle_remote_setup_command() -> str:
+    provider = _analyzer_provider()
+    base_url = (
+        os.environ.get("LOCAL_ANALYZER_BASE_URL", "").strip()
+        or os.environ.get("OPENAI_BASE_URL", "").strip()
+        or os.environ.get("SHARED_BASE_URL", "").strip()
+    )
+    if not base_url:
+        raise ValueError(
+            "Remote Kaggle analyzer setup requires LOCAL_ANALYZER_BASE_URL or OPENAI_BASE_URL."
+        )
+    model_id = (
+        os.environ.get("LOCAL_ANALYZER_MODEL_ID", "").strip()
+        or os.environ.get("SHARED_MODEL_NAME", "").strip()
+        or os.environ.get("MODEL", "").strip()
+    )
+    if not model_id or model_id.lower() == "local":
+        raise ValueError(
+            "Remote Kaggle analyzer setup requires LOCAL_ANALYZER_MODEL_ID or shared.model_name."
+        )
+    # Embed launcher API key into the private source bundle when present; the setup
+    # script still falls back to Kaggle notebook secrets at runtime.
+    api_key = (
+        os.environ.get("CEREBRAS_API_KEY", "").strip()
+        or os.environ.get("LOCAL_ANALYZER_API_KEY", "").strip()
+        or os.environ.get("OPENAI_API_KEY", "").strip()
+    )
+    replacements = {
+        "__LOCAL_ANALYZER_PROVIDER__": repr(provider),
+        "__LOCAL_ANALYZER_BASE_URL__": repr(base_url),
+        "__LOCAL_ANALYZER_MODEL_ID__": repr(model_id),
+        "__LOCAL_ANALYZER_API_KEY__": repr(api_key),
+        "__LOCAL_ANALYZER_APP_NAME__": repr(os.environ.get("LOCAL_ANALYZER_APP_NAME", "ARC3 Kaggle Harness")),
+        "__LOCAL_ANALYZER_CONTEXT_WINDOW__": repr(
+            int(os.environ.get("LOCAL_ANALYZER_CONTEXT_WINDOW") or DEFAULT_VLLM_MAX_MODEL_LEN)
+        ),
+        "__LOCAL_ANALYZER_MAX_OUTPUT__": repr(os.environ.get("LOCAL_ANALYZER_MAX_OUTPUT", "0")),
+        "__LOCAL_ANALYZER_TOOL_STEPS__": repr(os.environ.get("LOCAL_ANALYZER_TOOL_STEPS", "0")),
+        "__LOCAL_ANALYZER_TOOL_TIMEOUT__": repr(os.environ.get("LOCAL_ANALYZER_TOOL_TIMEOUT", "30")),
+        "__LOCAL_ANALYZER_TOOL_OUTPUT_TOKENS__": repr(os.environ.get("LOCAL_ANALYZER_TOOL_OUTPUT_TOKENS", "1024")),
+        "__LOCAL_ANALYZER_YIELD_SECONDS__": repr(os.environ.get("LOCAL_ANALYZER_YIELD_SECONDS", "60")),
+        "__LOCAL_ANALYZER_TEMPERATURE__": repr(os.environ.get("LOCAL_ANALYZER_TEMPERATURE", "0.6")),
+        "__LOCAL_ANALYZER_TOP_P__": repr(os.environ.get("LOCAL_ANALYZER_TOP_P", "0.95")),
+        "__LOCAL_ANALYZER_TOP_K__": repr(os.environ.get("LOCAL_ANALYZER_TOP_K", "20")),
+        "__LOCAL_ANALYZER_ENABLE_THINKING__": repr(os.environ.get("LOCAL_ANALYZER_ENABLE_THINKING", "0")),
+        "__MULTIMODAL_CONTEXT__": repr(os.environ.get("MULTIMODAL_CONTEXT", "current_grid")),
+        "__MULTIMODAL_UPSCALE__": repr(os.environ.get("MULTIMODAL_UPSCALE", "16")),
+    }
+    script = _DUCK_REMOTE_SETUP_SCRIPT
+    for placeholder, value in replacements.items():
+        script = script.replace(placeholder, value)
+    return f"\"$PYTHON\" - <<'PYSETUP'\n{script}\nPYSETUP"
 
 
 def _split_dataset_source(value: str, *, option_name: str) -> tuple[str, str]:
@@ -154,12 +235,18 @@ WHEELHOUSE_SLUG = __WHEELHOUSE_SLUG__
 MODEL_OWNER = __MODEL_OWNER__
 MODEL_SLUG = __MODEL_SLUG__
 SERVED_MODEL_NAME = __SERVED_MODEL_NAME__
+KAGGLE_MODEL_HF_REPO = __KAGGLE_MODEL_HF_REPO__
 VLLM_HOST = '127.0.0.1'
 VLLM_PORT = __VLLM_PORT__
 VLLM_BASE_URL = f'http://{VLLM_HOST}:{VLLM_PORT}/v1'
 VLLM_MAX_MODEL_LEN = __VLLM_MAX_MODEL_LEN__
 ANALYZER_CONTEXT_WINDOW = __ANALYZER_CONTEXT_WINDOW__
 VLLM_TENSOR_PARALLEL_SIZE = __VLLM_TENSOR_PARALLEL_SIZE__
+VLLM_TOOL_CALL_PARSER = __VLLM_TOOL_CALL_PARSER__
+VLLM_REASONING_PARSER = __VLLM_REASONING_PARSER__
+VLLM_QUANTIZATION = __VLLM_QUANTIZATION__
+VLLM_TRUST_REMOTE_CODE = __VLLM_TRUST_REMOTE_CODE__
+VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS = __VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS__
 WORKING_DIR = Path(os.environ['TAAF_KAGGLE_WORKING_DIR'])
 SITE_PACKAGES = WORKING_DIR / 'vllm-site-packages'
 VLLM_SERVER_LOG = WORKING_DIR / 'vllm-openai-server.log'
@@ -191,7 +278,38 @@ def resolve_kaggle_dataset_path(owner: str, slug: str) -> Path:
 
 
 WHEELHOUSE = resolve_kaggle_dataset_path(WHEELHOUSE_OWNER, WHEELHOUSE_SLUG)
-MODEL_PATH = resolve_kaggle_dataset_path(MODEL_OWNER, MODEL_SLUG)
+
+
+def resolve_model_path() -> Path:
+    if not MODEL_SLUG:
+        hf_repo = (KAGGLE_MODEL_HF_REPO or SERVED_MODEL_NAME or '').strip()
+        if not hf_repo:
+            raise FileNotFoundError(
+                'No Kaggle model dataset attached and no Hugging Face repo configured.'
+            )
+        print(f'Pulling model weights from Hugging Face: {hf_repo}', flush=True)
+        from huggingface_hub import snapshot_download
+
+        download_dir = WORKING_DIR / 'hf-model-snapshot'
+        return Path(snapshot_download(repo_id=hf_repo, local_dir=download_dir))
+    mapped = resolve_kaggle_dataset_path(MODEL_OWNER, MODEL_SLUG)
+    if mapped.exists():
+        return mapped
+    hf_repo = (KAGGLE_MODEL_HF_REPO or SERVED_MODEL_NAME or '').strip()
+    if not hf_repo:
+        return mapped
+    print(
+        f'Model dataset path missing for {MODEL_OWNER}/{MODEL_SLUG}; '
+        f'downloading {hf_repo} from Hugging Face',
+        flush=True,
+    )
+    from huggingface_hub import snapshot_download
+
+    download_dir = WORKING_DIR / 'hf-model-snapshot'
+    return Path(snapshot_download(repo_id=hf_repo, local_dir=download_dir))
+
+
+MODEL_PATH = resolve_model_path()
 
 
 def assert_expected_cuda_gpu() -> None:
@@ -324,17 +442,26 @@ def start_vllm_server() -> None:
         str(VLLM_TENSOR_PARALLEL_SIZE),
         '--enable-auto-tool-choice',
         '--tool-call-parser',
-        'qwen3_coder',
+        VLLM_TOOL_CALL_PARSER,
         '--generation-config',
         'vllm',
         '--enable-prefix-caching',
-        '--default-chat-template-kwargs',
-        '{"preserve_thinking": true}',
-        '--reasoning-parser',
-        'qwen3',
         '--max-model-len',
         str(VLLM_MAX_MODEL_LEN),
     ]
+    if VLLM_REASONING_PARSER:
+        cmd.extend(['--reasoning-parser', VLLM_REASONING_PARSER])
+    if VLLM_QUANTIZATION:
+        cmd.extend(['--quantization', VLLM_QUANTIZATION])
+    if VLLM_TRUST_REMOTE_CODE:
+        cmd.append('--trust-remote-code')
+    if VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS:
+        cmd.extend(
+            [
+                '--default-chat-template-kwargs',
+                json.dumps(VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS),
+            ]
+        )
     print('Starting vLLM OpenAI server:', ' '.join(cmd), flush=True)
     process = subprocess.Popen(cmd, env=vllm_env(), stdout=log_handle, stderr=subprocess.STDOUT, text=True)
     VLLM_SERVER_PID.write_text(str(process.pid), encoding='utf-8')
@@ -352,13 +479,13 @@ def run_vllm_api_smoke_test() -> None:
     response = request_json(f'{VLLM_BASE_URL}/chat/completions', payload=payload, timeout=120)
     generated = response['choices'][0]['message'].get('content', '').strip()
     print('\n' + '=' * 88, flush=True)
-    print('VLLM OPENAI SERVER QWEN SMOKE TEST REAL MODEL OUTPUT', flush=True)
+    print('VLLM OPENAI SERVER SMOKE TEST REAL MODEL OUTPUT', flush=True)
     print('Generated:', generated, flush=True)
     print('=' * 88 + '\n', flush=True)
 
 
 print(f'vLLM wheelhouse path: {WHEELHOUSE}', flush=True)
-print(f'Qwen model path: {MODEL_PATH}', flush=True)
+print(f'Model path: {MODEL_PATH}', flush=True)
 assert_expected_cuda_gpu()
 missing = [str(path) for path in (WHEELHOUSE, MODEL_PATH) if not path.exists()]
 if missing:
@@ -379,6 +506,91 @@ setup_env = {
     'INFERENCE_ANALYZER_MODEL': SERVED_MODEL_NAME,
     'LOCAL_ANALYZER_APP_NAME': __LOCAL_ANALYZER_APP_NAME__,
     'LOCAL_ANALYZER_CONTEXT_WINDOW': str(ANALYZER_CONTEXT_WINDOW),
+    'LOCAL_ANALYZER_MAX_OUTPUT': __LOCAL_ANALYZER_MAX_OUTPUT__,
+    'LOCAL_ANALYZER_TOOL_STEPS': __LOCAL_ANALYZER_TOOL_STEPS__,
+    'LOCAL_ANALYZER_TOOL_TIMEOUT': __LOCAL_ANALYZER_TOOL_TIMEOUT__,
+    'LOCAL_ANALYZER_TOOL_OUTPUT_TOKENS': __LOCAL_ANALYZER_TOOL_OUTPUT_TOKENS__,
+    'LOCAL_ANALYZER_YIELD_SECONDS': __LOCAL_ANALYZER_YIELD_SECONDS__,
+    'LOCAL_ANALYZER_TEMPERATURE': __LOCAL_ANALYZER_TEMPERATURE__,
+    'LOCAL_ANALYZER_TOP_P': __LOCAL_ANALYZER_TOP_P__,
+    'LOCAL_ANALYZER_TOP_K': __LOCAL_ANALYZER_TOP_K__,
+    'LOCAL_ANALYZER_ENABLE_THINKING': __LOCAL_ANALYZER_ENABLE_THINKING__,
+    'MULTIMODAL_CONTEXT': __MULTIMODAL_CONTEXT__,
+    'MULTIMODAL_UPSCALE': __MULTIMODAL_UPSCALE__,
+}
+setup_env_path = Path(os.environ['TAAF_KAGGLE_SETUP_ENV'])
+existing_setup_env = {}
+if setup_env_path.exists():
+    existing_setup_env = json.loads(setup_env_path.read_text(encoding='utf-8'))
+    if not isinstance(existing_setup_env, dict):
+        raise RuntimeError('TAAF_KAGGLE_SETUP_ENV must contain a JSON object.')
+existing_setup_env.update(setup_env)
+setup_env_path.write_text(json.dumps(existing_setup_env, indent=2), encoding='utf-8')
+"""
+
+_DUCK_REMOTE_SETUP_SCRIPT = r"""import json
+import os
+import urllib.request
+from pathlib import Path
+
+PROVIDER = __LOCAL_ANALYZER_PROVIDER__
+BASE_URL = __LOCAL_ANALYZER_BASE_URL__
+MODEL_ID = __LOCAL_ANALYZER_MODEL_ID__
+BUNDLED_API_KEY = __LOCAL_ANALYZER_API_KEY__
+API_KEY = (
+    BUNDLED_API_KEY
+    or os.environ.get('CEREBRAS_API_KEY', '').strip()
+    or os.environ.get('LOCAL_ANALYZER_API_KEY', '').strip()
+    or os.environ.get('OPENAI_API_KEY', '').strip()
+)
+if not API_KEY:
+    raise RuntimeError(
+        'Missing Cerebras API key on Kaggle. Set CEREBRAS_API_KEY as a notebook secret '
+        'or export it before launching make kaggle-duck.'
+    )
+
+
+def request_json(url: str, payload: dict, headers: dict[str, str], timeout: int = 60) -> dict:
+    data = json.dumps(payload).encode('utf-8')
+    request = urllib.request.Request(url, data=data, headers=headers)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode('utf-8'))
+
+
+headers = {
+    'Content-Type': 'application/json',
+    'Authorization': f'Bearer {API_KEY}',
+}
+smoke_payload = {
+    'model': MODEL_ID,
+    'messages': [{'role': 'user', 'content': 'Answer in one short sentence: what is 2 + 2?'}],
+    'temperature': 0.0,
+    'max_tokens': 64,
+}
+smoke_response = request_json(
+    f'{BASE_URL.rstrip("/")}/chat/completions',
+    smoke_payload,
+    headers=headers,
+    timeout=120,
+)
+generated = smoke_response.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
+print('\n' + '=' * 88, flush=True)
+print(f'REMOTE ANALYZER SMOKE TEST ({PROVIDER})', flush=True)
+print('Model:', MODEL_ID, flush=True)
+print('Generated:', generated, flush=True)
+print('=' * 88 + '\n', flush=True)
+
+setup_env = {
+    'LOCAL_ANALYZER_BASE_URL': BASE_URL,
+    'OPENAI_BASE_URL': BASE_URL,
+    'LOCAL_ANALYZER_PROVIDER': PROVIDER,
+    'OPENAI_PROVIDER': PROVIDER,
+    'LOCAL_ANALYZER_MODEL_ID': MODEL_ID,
+    'INFERENCE_ANALYZER_MODEL': MODEL_ID,
+    'LOCAL_ANALYZER_API_KEY': API_KEY,
+    'OPENAI_API_KEY': API_KEY,
+    'LOCAL_ANALYZER_APP_NAME': __LOCAL_ANALYZER_APP_NAME__,
+    'LOCAL_ANALYZER_CONTEXT_WINDOW': str(__LOCAL_ANALYZER_CONTEXT_WINDOW__),
     'LOCAL_ANALYZER_MAX_OUTPUT': __LOCAL_ANALYZER_MAX_OUTPUT__,
     'LOCAL_ANALYZER_TOOL_STEPS': __LOCAL_ANALYZER_TOOL_STEPS__,
     'LOCAL_ANALYZER_TOOL_TIMEOUT': __LOCAL_ANALYZER_TOOL_TIMEOUT__,

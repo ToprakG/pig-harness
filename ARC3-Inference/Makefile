@@ -84,6 +84,15 @@ KAGGLE_ACCELERATOR ?= NvidiaRtxPro6000
 KAGGLE_RUN_AS_SUBMISSION ?= false
 KAGGLE_DRY_RUN ?= false
 KAGGLE_DATASET_VERSION_MESSAGE ?=
+KAGGLE_MODEL_DATASET_SOURCE ?= $(shell $(CONFIG_VALUE) kaggle.model_dataset_source)
+KAGGLE_SERVED_MODEL_NAME ?= $(shell $(CONFIG_VALUE) kaggle.served_model_name)
+KAGGLE_MODEL_HF_REPO ?= $(shell $(CONFIG_VALUE) kaggle.model_hf_repo)
+KAGGLE_VLLM_TOOL_CALL_PARSER ?= $(shell $(CONFIG_VALUE) kaggle.tool_call_parser $(SERVER_TOOL_CALL_PARSER))
+KAGGLE_VLLM_REASONING_PARSER ?= $(shell $(CONFIG_VALUE) kaggle.reasoning_parser $(SERVER_REASONING_PARSER))
+KAGGLE_VLLM_MAX_MODEL_LEN ?= $(shell $(CONFIG_VALUE) kaggle.max_model_len $(SERVER_MAX_MODEL_LEN))
+KAGGLE_VLLM_QUANTIZATION ?= $(shell $(CONFIG_VALUE) kaggle.quantization $(SERVER_QUANTIZATION))
+KAGGLE_VLLM_TRUST_REMOTE_CODE ?= $(shell $(CONFIG_VALUE) kaggle.trust_remote_code $(SERVER_TRUST_REMOTE_CODE))
+KAGGLE_VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS ?= $(shell $(CONFIG_VALUE) kaggle.default_chat_template_kwargs $(SERVER_DEFAULT_CHAT_TEMPLATE_KWARGS))
 
 SERVER_BACKEND ?= $(shell $(CONFIG_VALUE) server.backend vllm)
 SERVER_HOST ?= $(shell $(CONFIG_VALUE) server.host 127.0.0.1)
@@ -109,6 +118,7 @@ SERVER_TENSOR_PARALLEL_SIZE ?= $(shell $(CONFIG_VALUE) server.tensor_parallel_si
 SERVER_MAX_MODEL_LEN ?= $(shell $(CONFIG_VALUE) server.max_model_len $(SERVER_SHARED_CONTEXT_WINDOW))
 SERVER_DTYPE ?= $(shell $(CONFIG_VALUE) server.dtype)
 SERVER_GPU_MEMORY_UTILIZATION ?= $(shell $(CONFIG_VALUE) server.gpu_memory_utilization)
+SERVER_QUANTIZATION ?= $(shell $(CONFIG_VALUE) server.quantization)
 SERVER_TRUST_REMOTE_CODE ?= $(shell $(CONFIG_VALUE) server.trust_remote_code false)
 SERVER_GENERATION_CONFIG ?= $(shell $(CONFIG_VALUE) server.generation_config vllm)
 SERVER_LANGUAGE_MODEL_ONLY ?= $(shell $(CONFIG_VALUE) server.language_model_only false)
@@ -187,6 +197,15 @@ VIEW_RUNS_DIR ?= $(RUNS_DIR)
 # so a bare `make view` opens it. Falls back to VIEW_RUNS_DIR when absent.
 VIEW_RUN_DIR ?= $(wildcard $(REPO_ROOT)/../example-run)
 
+export KAGGLE_MODEL_DATASET_SOURCE
+export KAGGLE_SERVED_MODEL_NAME
+export KAGGLE_MODEL_HF_REPO
+export KAGGLE_VLLM_TOOL_CALL_PARSER
+export KAGGLE_VLLM_REASONING_PARSER
+export KAGGLE_VLLM_MAX_MODEL_LEN
+export KAGGLE_VLLM_QUANTIZATION
+export KAGGLE_VLLM_TRUST_REMOTE_CODE
+export KAGGLE_VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS
 export LOCAL_ANALYZER_BASE_URL
 export LOCAL_ANALYZER_PROVIDER
 export LOCAL_ANALYZER_MODEL_ID
@@ -390,6 +409,11 @@ sbatch: install-local-sources
 sbatch: _taaf-run
 
 kaggle-duck: DEPLOYMENT_TARGET = kaggle
+kaggle-duck: CONFIG_PATH = configs/inference.gemma.json
+kaggle-duck: LOCAL_ANALYZER_PROVIDER = vllm
+kaggle-duck: EXPERIMENTS_DIR = $(RUNS_DIR)
+kaggle-duck: KAGGLE_ENABLE_INTERNET = false
+kaggle-duck: KAGGLE_CPU_ONLY = false
 kaggle-duck: KAGGLE_DUCK_PUBLIC_HARNESS = true
 kaggle-duck: AGENT = duck-harness
 kaggle-duck: GAME =
@@ -398,8 +422,8 @@ kaggle-duck: GAME_TAGS =
 kaggle-duck: EXCLUDE_GAME_TAGS =
 kaggle-duck: MODEL = local
 kaggle-duck: RUN_NAME = duck-harness-kaggle
-kaggle-duck: MAX_RUNTIME_MINUTES = 132
-kaggle-duck: MAX_EXPERIMENT_RUNTIME_MINUTES = 540
+kaggle-duck: MAX_RUNTIME_MINUTES = 45
+kaggle-duck: MAX_EXPERIMENT_RUNTIME_MINUTES = 45
 kaggle-duck: MAX_EXPERIMENT_RUNTIME_HOURS =
 kaggle-duck: N_PASSES = 1
 kaggle-duck: CONCURRENT_JOBS = 28

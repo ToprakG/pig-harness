@@ -289,6 +289,13 @@ def _make_deployment_target(
             option_name="--deployment-source-repos",
         )
         kernel_slug = _default_kaggle_kernel_slug(args)
+        analyzer_provider = os.environ.get(
+            "LOCAL_ANALYZER_PROVIDER",
+            os.environ.get("SHARED_PROVIDER", "vllm"),
+        ).strip().lower()
+        enable_internet = bool(getattr(args, "kaggle_enable_internet", False))
+        if analyzer_provider not in {"", "vllm", "openai", "openai-compatible", "compat"}:
+            enable_internet = True
         target_kwargs: dict[str, Any] = {
             "username": str(getattr(args, "kaggle_username", "") or "").strip() or None,
             "kernel_slug": kernel_slug,
@@ -302,7 +309,7 @@ def _make_deployment_target(
             "extra_source_repos": [_project_root, *source_repos],
             "run_as_submission": bool(getattr(args, "kaggle_run_as_submission", False)),
             "public": bool(getattr(args, "kaggle_public", False)),
-            "enable_internet": bool(getattr(args, "kaggle_enable_internet", False)),
+            "enable_internet": enable_internet,
             "cpu_only": bool(getattr(args, "kaggle_cpu_only", False)),
             "accelerator": str(getattr(args, "kaggle_accelerator", "") or "").strip()
             or None,

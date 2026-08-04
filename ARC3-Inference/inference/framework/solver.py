@@ -770,6 +770,15 @@ class HarnessSolver(Solver):
     kaggle_wheelhouse_stamp_text: str = field(
         default=DEFAULT_WHEELHOUSE_STAMP_TEXT, repr=False
     )
+    kaggle_model_hf_repo: str = field(default="", repr=False)
+    kaggle_vllm_tool_call_parser: str = field(default="qwen3_coder", repr=False)
+    kaggle_vllm_reasoning_parser: str = field(default="qwen3", repr=False)
+    kaggle_vllm_quantization: str = field(default="", repr=False)
+    kaggle_vllm_trust_remote_code: bool = field(default=False, repr=False)
+    kaggle_vllm_default_chat_template_kwargs: dict[str, object] | None = field(
+        default=None,
+        repr=False,
+    )
     cancel_drain_timeout_s: float = DEFAULT_CANCEL_DRAIN_TIMEOUT_SECONDS
     analyzer_factory: AnalyzerFactory | None = field(
         default=None, repr=False, compare=False
@@ -851,31 +860,84 @@ class HarnessSolver(Solver):
 
     @property
     def kaggle_dataset_sources(self) -> list[str]:
-        if not self.kaggle_enable_vllm:
-            return []
         return duck_kaggle_dataset_sources(self._kaggle_vllm_config())
 
     @property
     def kaggle_setup_commands(self) -> list[str]:
-        if not self.kaggle_enable_vllm:
-            return []
         return [duck_kaggle_setup_command(self._kaggle_vllm_config())]
 
     @property
     def kaggle_teardown_commands(self) -> list[str]:
-        if not self.kaggle_enable_vllm:
-            return []
-        return [duck_kaggle_teardown_command()]
+        command = duck_kaggle_teardown_command()
+        return [command] if command else []
 
     def _kaggle_vllm_config(self) -> DuckKaggleVllmConfig:
+        def env_text(name: str, default: str) -> str:
+            if name in os.environ:
+                return str(os.environ[name]).strip()
+            return str(default).strip()
+
+        def env_bool(name: str, default: bool) -> bool:
+            raw = os.environ.get(name)
+            if raw is None or str(raw).strip() == "":
+                return default
+            return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+        chat_template_kwargs = self.kaggle_vllm_default_chat_template_kwargs
+        raw_chat_template_kwargs = os.environ.get("KAGGLE_VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS")
+        if raw_chat_template_kwargs and str(raw_chat_template_kwargs).strip():
+            import json
+
+            parsed = json.loads(str(raw_chat_template_kwargs))
+            if not isinstance(parsed, dict):
+                raise ValueError(
+                    "KAGGLE_VLLM_DEFAULT_CHAT_TEMPLATE_KWARGS must contain a JSON object."
+                )
+            chat_template_kwargs = parsed
+
         return DuckKaggleVllmConfig(
-            wheelhouse_dataset_source=self.kaggle_wheelhouse_dataset_source,
-            model_dataset_source=self.kaggle_model_dataset_source,
-            served_model_name=self.kaggle_served_model_name,
+            wheelhouse_dataset_source=env_text(
+                "KAGGLE_WHEELHOUSE_DATASET_SOURCE",
+                self.kaggle_wheelhouse_dataset_source,
+            ),
+            model_dataset_source=env_text(
+                "KAGGLE_MODEL_DATASET_SOURCE",
+                self.kaggle_model_dataset_source,
+            ),
+            served_model_name=env_text(
+                "KAGGLE_SERVED_MODEL_NAME",
+                self.kaggle_served_model_name,
+            ),
+            model_hf_repo=env_text(
+                "KAGGLE_MODEL_HF_REPO",
+                self.kaggle_model_hf_repo,
+            ),
             vllm_port=self.kaggle_vllm_port,
-            max_model_len=self.kaggle_vllm_max_model_len,
+            max_model_len=int(
+                env_text(
+                    "KAGGLE_VLLM_MAX_MODEL_LEN",
+                    str(self.kaggle_vllm_max_model_len),
+                )
+            ),
             tensor_parallel_size=self.kaggle_vllm_tensor_parallel_size,
             wheelhouse_stamp_text=self.kaggle_wheelhouse_stamp_text,
+            tool_call_parser=env_text(
+                "KAGGLE_VLLM_TOOL_CALL_PARSER",
+                self.kaggle_vllm_tool_call_parser,
+            ),
+            reasoning_parser=env_text(
+                "KAGGLE_VLLM_REASONING_PARSER",
+                self.kaggle_vllm_reasoning_parser,
+            ),
+            quantization=env_text(
+                "KAGGLE_VLLM_QUANTIZATION",
+                self.kaggle_vllm_quantization,
+            ),
+            trust_remote_code=env_bool(
+                "KAGGLE_VLLM_TRUST_REMOTE_CODE",
+                self.kaggle_vllm_trust_remote_code,
+            ),
+            default_chat_template_kwargs=chat_template_kwargs,
         )
 
     def _setup(self) -> None:
