@@ -243,6 +243,7 @@ export MULTIMODAL_UPSCALE
 export CHAT_PROVIDER
 export OPENROUTER_API_KEY
 export CEREBRAS_API_KEY
+export DEEPINFRA_API_KEY
 export OPENAI_API_KEY
 export LOCAL_ANALYZER_API_KEY
 export CHAT_API_KEY
@@ -482,14 +483,29 @@ _taaf-run:
 	@local_analyzer_api_key="$${LOCAL_ANALYZER_API_KEY:-}"; \
 	case "$(LOCAL_ANALYZER_PROVIDER)" in \
 		cerebras) \
-			if [ -z "$$local_analyzer_api_key" ] && [ -z "$${CEREBRAS_API_KEY:-}" ] && [ -z "$${OPENAI_API_KEY:-}" ]; then \
+			if [ -z "$$local_analyzer_api_key" ]; then \
+				local_analyzer_api_key="$${CEREBRAS_API_KEY:-$${OPENAI_API_KEY:-}}"; \
+			fi; \
+			if [ -z "$$local_analyzer_api_key" ]; then \
 				echo "Cerebras analyzer config requires CEREBRAS_API_KEY, LOCAL_ANALYZER_API_KEY, or OPENAI_API_KEY."; \
 				exit 1; \
 			fi; \
 			;; \
 		openrouter) \
-			if [ -z "$$local_analyzer_api_key" ] && [ -z "$${OPENROUTER_API_KEY:-}" ] && [ -z "$${OPENAI_API_KEY:-}" ]; then \
+			if [ -z "$$local_analyzer_api_key" ]; then \
+				local_analyzer_api_key="$${OPENROUTER_API_KEY:-$${OPENAI_API_KEY:-}}"; \
+			fi; \
+			if [ -z "$$local_analyzer_api_key" ]; then \
 				echo "OpenRouter analyzer config requires OPENROUTER_API_KEY, LOCAL_ANALYZER_API_KEY, or OPENAI_API_KEY."; \
+				exit 1; \
+			fi; \
+			;; \
+		deepinfra) \
+			if [ -z "$$local_analyzer_api_key" ]; then \
+				local_analyzer_api_key="$${DEEPINFRA_API_KEY:-$${OPENAI_API_KEY:-}}"; \
+			fi; \
+			if [ -z "$$local_analyzer_api_key" ]; then \
+				echo "DeepInfra analyzer config requires DEEPINFRA_API_KEY, LOCAL_ANALYZER_API_KEY, or OPENAI_API_KEY."; \
 				exit 1; \
 			fi; \
 			;; \
@@ -548,6 +564,15 @@ _taaf-run:
 chat:
 	@chat_api_key="$${CHAT_API_KEY:-}"; \
 	case "$(CHAT_PROVIDER)" in \
+		cerebras) \
+			if [ -z "$$chat_api_key" ]; then chat_api_key="$${CEREBRAS_API_KEY:-$${OPENAI_API_KEY:-}}"; fi; \
+			;; \
+		openrouter) \
+			if [ -z "$$chat_api_key" ]; then chat_api_key="$${OPENROUTER_API_KEY:-$${OPENAI_API_KEY:-}}"; fi; \
+			;; \
+		deepinfra) \
+			if [ -z "$$chat_api_key" ]; then chat_api_key="$${DEEPINFRA_API_KEY:-$${OPENAI_API_KEY:-}}"; fi; \
+			;; \
 		vllm|openai|openai-compatible|compat|"") \
 			if [ -z "$$chat_api_key" ] && [ -f "$(SERVER_API_KEY_FILE)" ]; then \
 				chat_api_key="$$(head -n 1 "$(SERVER_API_KEY_FILE)")"; \

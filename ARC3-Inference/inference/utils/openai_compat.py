@@ -12,6 +12,11 @@ def normalize_provider(value: str | None) -> str:
         return "openrouter"
     if provider == "cerebras":
         return "cerebras"
+    # DeepInfra serves an OpenAI-compatible endpoint but rejects the vLLM-only
+    # payload fields (top_k, chat_template_kwargs), so keep it off the "vllm"
+    # branch in build_chat_payload and send the plain OpenAI body.
+    if provider in {"deepinfra", "deep-infra"}:
+        return "deepinfra"
     return provider
 
 
