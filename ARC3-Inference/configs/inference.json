@@ -78,5 +78,19 @@
   "multimodal" : {
     "context" : "current_grid",
     "upscale" : 4
+  },
+  "meta": {
+    "enabled": false,
+    "first_clear_deadline": 60,
+    "phi": 0.25,
+    "min_actions_before_restart": 30,
+    "max_restarts_per_pass": 2,
+    "budget_reserve_frac": 0.25,
+    "post_clear_restart": "forbidden",
+    "mixture": {
+      "pi": 0.36,
+      "p_E": 0.83,
+      "p_H": 0.15
+    }
   }
 }

@@ -177,6 +177,7 @@ LOCAL_ANALYZER_SITE_URL ?= $(shell $(CONFIG_VALUE) analyzer.site_url)
 LOCAL_ANALYZER_APP_NAME ?= $(shell $(CONFIG_VALUE) analyzer.app_name ARC3 Agent Harness)
 ANALYZER_TIMEOUT ?= $(shell $(CONFIG_VALUE) analyzer.timeout 120)
 ANALYZER_SAVE_REQUEST_LOGS ?= $(shell $(CONFIG_VALUE) analyzer.save_request_logs false)
+META_CONFIG_JSON ?= $(shell $(CONFIG_VALUE) meta)
 DEPLOYMENT_SLURM_START_LOCAL_SERVER ?= $(shell $(CONFIG_VALUE) deployment.slurm.start_local_server $(if $(filter vllm,$(LOCAL_ANALYZER_PROVIDER)),true,false))
 DEPLOYMENT_SLURM_LOCAL_SERVER_CONFIG ?= $(CONFIG_PATH)
 
@@ -534,6 +535,7 @@ _taaf-run:
 		--agent "$(AGENT)" \
 		--model $(MODEL) \
 		--analyzer-timeout "$(ANALYZER_TIMEOUT)" \
+		$(if $(strip $(META_CONFIG_JSON)),--meta-config '$(META_CONFIG_JSON)',) \
 		--deployment-target "$(DEPLOYMENT_TARGET)" \
 		$(if $(filter true TRUE 1 yes YES on ON,$(DEPLOYMENT_WAIT)),--deployment-wait,--no-deployment-wait) \
 		$(if $(filter-out [],$(strip $(DEPLOYMENT_SOURCE_REPOS))),--deployment-source-repos '$(DEPLOYMENT_SOURCE_REPOS)',) \

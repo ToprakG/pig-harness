@@ -84,3 +84,53 @@ these are reported, not silently skipped.
   pc=0 refuses credit for truncated-but-cleared attempts. The live A/B must
   therefore treat truncated clears fairly (they do score in the real
   harness).
+
+## Phase 6 — D1: RESET semantics (BLOCKING, resolved)
+
+Source: `arcengine/base_game.py` (`handle_reset`, `full_reset`,
+`level_reset`; arcengine==0.9.3 installed package).
+
+* `GameAction.RESET` triggers `handle_reset()`:
+  * if `_action_count == 0` **or** state is `WIN` → `full_reset()`
+    (all levels re-cloned, score → 0, back to level 0);
+  * otherwise → `level_reset()` — **only the current level** is re-cloned;
+    score and level index are retained. (`ONLY_RESET_LEVELS=true` forces
+    level-reset behavior outside WIN.)
+* Consequence: a mid-run RESET does **not** wipe completed-level progress.
+  For the v1 policy this is doubly safe: restarts are only issued at
+  level 1 (where level-reset and full-reset coincide and score is 0), and
+  `post_clear_restart="forbidden"` blocks any restart after a clear.
+  A future policy v2 could exploit per-level retries; v1 must not and
+  does not.
+* Note: RESET does not increment the engine `_action_count` (`_set_action`
+  skips it), but it does append to the taaf-level run history, which is why
+  RESET actions appear with `action_num`s in the event logs.
+
+## Phase 6 — D2: c_reset (re-orientation cost after reset)
+
+Measured from the 735 RESET actions inside example-run trajectories
+(engine game-overs followed by the existing auto-reset):
+
+* Actions until the next board-changing action after a RESET:
+  mean 0.13, median 0, p90 1 (vs mean 0.30 from run start).
+* Actions per LLM call in the 10-action window after a RESET: 4.01 vs 3.57
+  run-wide — the agent is *faster* post-reset (it replays known moves), not
+  slower.
+* **c_reset ≈ 0 action-equivalents**, far below the 20-action threshold
+  that would have forced a Phase-4 re-run with restart costs added. No
+  parameter update needed.
+
+## Phase 6 — integration notes
+
+* The restart hook lives in `should_stop()` but fires only after all hard
+  stop conditions are checked, and never while inside `step_env` (mid-batch)
+  or inside `analyzer.analyze` (the analyzer polls `should_stop` as a
+  callback) — a restart mutating game state mid-batch/mid-analysis would
+  execute the remaining batch actions against a freshly reset board.
+* The RESET viewer event issued by the policy carries `"meta_restart": true`
+  for A/B attribution; engine auto-resets remain untagged.
+* D4 parity: `tests/meta/test_noop_parity.py` replays a scripted mock
+  session (single action, batch, no-op, engine game-over → auto-reset,
+  level clear) and compares the full viewer-event sequence against a golden
+  fixture generated from the pre-integration solver. Green post-integration
+  with meta disabled and with `{"enabled": false}` explicitly set.

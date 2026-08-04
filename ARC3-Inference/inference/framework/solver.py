@@ -183,6 +183,11 @@ class _HarnessGameSession:
     last_engine_action: str | None = None
     token_baseline: int = 0
     _viewer_events_flushed: int = field(default=0, init=False, repr=False)
+    _meta_runtime: Any = field(default=None, init=False, repr=False)
+    _meta_runtime_ready: bool = field(default=False, init=False, repr=False)
+    _in_step_env: bool = field(default=False, init=False, repr=False)
+    _in_analyze: bool = field(default=False, init=False, repr=False)
+    _tag_meta_restart: bool = field(default=False, init=False, repr=False)
 
     def current_frame(self) -> Frame:
         return Frame(
@@ -243,6 +248,44 @@ class _HarnessGameSession:
             return None
         return max(0.1, min(candidates))
 
+    def _meta(self) -> Any:
+        """Lazily build the meta restart runtime (None when disabled)."""
+        if not self._meta_runtime_ready:
+            self._meta_runtime_ready = True
+            config_dict = getattr(self.solver, "meta_config", None)
+            if config_dict and config_dict.get("enabled"):
+                from inference.meta.policy import MetaConfig
+                from inference.meta.tracker import MetaRuntime
+
+                self._meta_runtime = MetaRuntime(MetaConfig.from_dict(config_dict))
+        return self._meta_runtime
+
+    def _budget_used_frac(self) -> float:
+        if self.solver.max_runtime_s_per_game is None:
+            return 0.0
+        elapsed = max(0.0, time.monotonic() - self.started_at)
+        return min(1.0, elapsed / self.solver.max_runtime_s_per_game)
+
+    def _maybe_meta_restart(self) -> None:
+        """Issue a meta restart when the policy calls for one.
+
+        Fires only from the main play loop (never mid-batch or from inside
+        an analyzer callback executing actions) and only when no hard stop
+        condition holds, so the disabled path is byte-identical to upstream.
+        """
+        meta = self._meta()
+        if meta is None or self._in_step_env or self._in_analyze:
+            return
+        if not meta.should_restart(level=_level_number(self.game),
+                                   budget_used_frac=self._budget_used_frac()):
+            return
+        self._tag_meta_restart = True
+        try:
+            self._execute_auto_reset()
+        finally:
+            self._tag_meta_restart = False
+        meta.on_meta_restart()
+
     def should_stop(self) -> bool:
         run = self.game.game_run
         if run is None or run.state != "playing":
@@ -258,6 +301,7 @@ class _HarnessGameSession:
             and self.action_count >= self.solver.max_actions_per_game
         ):
             return True
+        self._maybe_meta_restart()
         return False
 
     def play(self) -> None:
@@ -284,11 +328,15 @@ class _HarnessGameSession:
                 if retry_analysis_step is None:
                     self.analysis_step += 1
                     analysis_step = self.analysis_step
+                    meta = self._meta()
+                    if meta is not None:
+                        meta.note_analysis_step()
                 else:
                     analysis_step = retry_analysis_step
 
                 self.write_runtime_state()
                 transcript_before = self._read_transcript_bytes()
+                self._in_analyze = True
                 try:
                     result = self.analyzer.analyze(
                         self.state_path,
@@ -301,6 +349,7 @@ class _HarnessGameSession:
                         should_stop=self.should_stop,
                     )
                 finally:
+                    self._in_analyze = False
                     transcript_delta = self._transcript_delta_since(transcript_before)
                     if transcript_delta.strip():
                         self._append_analysis_viewer_event(
@@ -419,8 +468,12 @@ class _HarnessGameSession:
     def _append_action_viewer_event(
         self, payload: dict[str, Any], frame: Frame
     ) -> None:
+        extra: dict[str, Any] = (
+            {"meta_restart": True} if self._tag_meta_restart else {}
+        )
         self.viewer_events.append(
             {
+                **extra,
                 **self._base_viewer_event(frame),
                 "type": "action",
                 "title": f"Action {int(payload.get('action_num') or self.action_count)}",
@@ -586,6 +639,13 @@ class _HarnessGameSession:
         }
 
     def step_env(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        self._in_step_env = True
+        try:
+            return self._step_env_inner(arguments)
+        finally:
+            self._in_step_env = False
+
+    def _step_env_inner(self, arguments: dict[str, Any]) -> dict[str, Any]:
         requested_actions, error = self._normalize_actions(arguments)
         if error is not None or requested_actions is None:
             return self._error_payload(error or "Could not parse action request.")
@@ -701,6 +761,11 @@ class _HarnessGameSession:
         )
         raw_state = new_state.raw.state
         board_changed = previous_grid != _grid_from_state(new_state)
+        meta = self._meta()
+        if meta is not None:
+            # feeds the restart policy's ring buffers; the grid is hashed
+            # inside note_action and never stored
+            meta.note_action(board_changed, _grid_from_state(new_state))
         level_completed = bool(
             new_state.just_won_level and raw_state != arcengine.GameState.WIN
         )
@@ -780,6 +845,9 @@ class HarnessSolver(Solver):
         repr=False,
     )
     cancel_drain_timeout_s: float = DEFAULT_CANCEL_DRAIN_TIMEOUT_SECONDS
+    # Probabilistic-restart meta layer (inference/meta). None or
+    # {"enabled": false, ...} keeps the solver byte-identical to upstream.
+    meta_config: dict[str, Any] | None = None
     analyzer_factory: AnalyzerFactory | None = field(
         default=None, repr=False, compare=False
     )

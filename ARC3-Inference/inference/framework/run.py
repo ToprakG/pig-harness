@@ -422,12 +422,15 @@ def _make_solver(
         _validate_local_server_config(args)
     local_server_count = max(1, int(args.slurm_gpu_count)) if start_local_server else 1
     effective_concurrency = _effective_concurrent_jobs(args)
+    raw_meta = str(getattr(args, "meta_config", "") or "").strip()
+    meta_config = json.loads(raw_meta) if raw_meta else None
     return HarnessSolver(
         label=args.agent,
         model=args.model,
         analyzer_timeout=getattr(args, "analyzer_timeout", 120),
         max_actions_per_game=args.max_actions,
         max_runtime_s_per_game=max_runtime_minutes_per_game * 60.0,
+        meta_config=meta_config,
         concurrency=effective_concurrency,
         save_request_logs=bool(args.analyzer_save_request_logs),
         start_local_server=start_local_server,
@@ -1254,6 +1257,15 @@ def main() -> None:
         dest="analyzer_timeout",
         type=float,
         default=120,
+    )
+    parser.add_argument(
+        "--meta-config",
+        dest="meta_config",
+        default="",
+        help=(
+            "JSON object for the probabilistic-restart meta layer "
+            '(e.g. \'{"enabled": true}\'). Empty keeps it disabled.'
+        ),
     )
     parser.add_argument(
         "--deployment-target", choices=["inline", "slurm", "kaggle"], default="inline"
