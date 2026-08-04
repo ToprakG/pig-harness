@@ -85,3 +85,30 @@ Karşılaşılan üç engel ve çözümü:
    verilmezse yerel vLLM'e (127.0.0.1:1234) gidip sessizce 0 aksiyon üretiyor.
 
 Çalışan komut `run_ab.sh` içinde.
+
+## A/B sonuç #1 (ft09 + vc33, 3 pass, 10 dk/oyun) — SONUÇSUZ
+
+| kol | ortalama | medyan | aksiyon | token | compaction |
+|---|---|---|---|---|---|
+| off | 0.00 | 0.00 | 1204 | 464.372 | 0 kez |
+| on  | 0.60 | 0.00 | 1287 | 465.022 | **240 kez** |
+
+Mekanizma çalıştı: 240 tetikleme, 6 transkriptin hepsinde `COMPACTED HISTORY`.
+Kapalı kolda hiç tetiklenmedi. Düzenek doğru.
+
+**Ama sonuç istatistiksel olarak anlamsız.** Farkın tamamı tek bir pass'tan
+geliyor (vc33 bir pass'ta 1.19, geri kalan 5 koşu her iki kolda da 0). Medyan
+iki kolda da 0.00. 6 koşuda 1-0 farkı → Fisher p≈0.5.
+
+Duck'ın kendi verisi bu tuzağı zaten gösteriyordu: ar25'in 20 pass skoru
+`0.0, 0.0, 0.0, 0.04, ... 6.81, 7.06, 8.33`. Bu dağılımda 3 pass ile karar
+vermek kumar.
+
+Zayıf ama yönü doğru bir yan gözlem: "on" kolu aynı token bütçesiyle daha
+fazla aksiyon aldı (1287 vs 1204) — token başına daha az tekrar. Compaction
+ek token maliyeti getirmedi (deterministik olduğu için beklendiği gibi).
+
+Not: mutlak skorlar duck'ın yayınladığından çok düşük (ft09 için onlar 10.28
+diyor, biz 0.00). İki sebep: 10 dk/oyun bütçe (onlar 45 dk) ve farklı model
+(gpt-oss-120b vs Qwen3.6-27B-FP8). Bu A/B mutlak skoru değil, iki kol
+arasındaki FARKI ölçmek için kuruldu.

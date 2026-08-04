@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from typing import Any
 
 MAX_NOTES = 40
@@ -165,6 +166,11 @@ class CompactionStore:
             return
         self.compactions += 1
         self.dropped_messages += len(messages)
+        # A/B'nin gecerli olmasi icin compaction'in GERCEKTEN tetiklendigini
+        # gormemiz sart: hic tetiklenmezse iki kol ayni olur ve olcum bos cikar.
+        print(f"[compaction] fired #{self.compactions} "
+              f"(dropped {len(messages)} msgs, {len(self._notes)} notes held)",
+              file=sys.stderr, flush=True)
         for note in notes:
             if note not in self._notes:
                 self._notes.append(note)
