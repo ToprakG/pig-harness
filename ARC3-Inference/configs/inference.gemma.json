@@ -75,7 +75,7 @@
   },
   "multimodal": {
     "context": "current_grid",
-    "upscale": 16
+    "upscale": 4
   },
   "kaggle": {
     "model_dataset_source": "saltb0x/gemma-4-31b-it-qat-w4a16-pruned23808",

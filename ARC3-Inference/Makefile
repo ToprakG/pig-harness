@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := interactive
 
-.PHONY: install install-local-sources prepare-ci server stop-server check-server interactive sbatch kaggle-duck run _taaf-run chat eval score_run significance view trace traces zip clean cluster_view_queue
+.PHONY: install install-local-sources prepare-ci server stop-server check-server interactive sbatch kaggle-duck run _taaf-run chat eval fast-eval score_run significance view trace traces zip clean cluster_view_queue
 
 -include .env
 
@@ -56,6 +56,22 @@ N_PASSES ?= $(shell $(CONFIG_VALUE) environment.n_passes 1)
 CONCURRENT_JOBS ?= $(shell $(CONFIG_VALUE) environment.concurrent_jobs 1)
 SIMULATE_COMPETITION_ARCADE ?= false
 COMPETITION_CLONE_RUNS ?=
+
+# Fast eval: a 9-game slice of the official public set for a quick read on model
+# quality without paying for all 25. Ids are pinned in full because `--game`
+# short prefixes resolve against the official list and would silently drift if
+# that list ever changes.
+FAST_EVAL_GAMES ?= ar25-0c556536,dc22-fdcac232,ft09-0d8bbf25,lp85-305b61c3,m0r0-492f87ba,r11l-495a7899,sb26-7fbdac44,sp80-589a99af,vc33-5430563c
+FAST_EVAL_MINUTES ?= 10
+FAST_EVAL_PASSES ?= 1
+FAST_EVAL_CONCURRENCY ?= 9
+# Simply-expanded (:=) so the run and the scoring step below resolve to the same
+# directory instead of re-running `date` and disagreeing by a second.
+FAST_EVAL_STAMP := $(shell date +%Y%m%d_%H%M%S)
+# Lands directly under runs/ with a <timestamp>_<label> name, which is what
+# is_selectable_run_dir_name() matches — a nested runs/fast-eval/<stamp> would
+# not show up in `make view`'s run list.
+FAST_EVAL_DIR ?= $(RUNS_DIR)/$(FAST_EVAL_STAMP)_fast-eval
 MODEL ?= $(shell $(CONFIG_VALUE) analyzer.model_id $(SHARED_MODEL_NAME))
 AGENT ?= inference
 RUN_NAME ?=
@@ -402,6 +418,34 @@ run: interactive
 interactive: DEPLOYMENT_TARGET = inline
 interactive: DEPLOYMENT_WAIT = true
 interactive: _taaf-run
+
+# Plays only FAST_EVAL_GAMES, then scores the run and writes the scoreboard next
+# to it. Model choice stays orthogonal — pick it with CONFIG_PATH, e.g.
+#   CONFIG_PATH=configs/inference.gemma.json make fast-eval
+fast-eval: DEPLOYMENT_TARGET = inline
+fast-eval: DEPLOYMENT_WAIT = true
+fast-eval: GAME = $(FAST_EVAL_GAMES)
+fast-eval: GAME_TAGS =
+fast-eval: EXCLUDE_GAME_TAGS =
+fast-eval: MAX_RUNTIME_MINUTES = $(FAST_EVAL_MINUTES)
+fast-eval: MAX_EXPERIMENT_RUNTIME_MINUTES =
+fast-eval: MAX_EXPERIMENT_RUNTIME_HOURS =
+fast-eval: N_PASSES = $(FAST_EVAL_PASSES)
+fast-eval: CONCURRENT_JOBS = $(FAST_EVAL_CONCURRENCY)
+fast-eval: EXPERIMENT_DIR = $(FAST_EVAL_DIR)
+fast-eval: _taaf-run
+	@mkdir -p "$(FAST_EVAL_DIR)"
+	@echo ""
+	@echo "fast-eval: scoring $(FAST_EVAL_DIR)"
+	@$(UV_RUN) inference-eval "$(FAST_EVAL_DIR)" \
+		--score-output "$(FAST_EVAL_DIR)/score.json" \
+		> "$(FAST_EVAL_DIR)/fast-eval.log" 2>&1 \
+		|| { cat "$(FAST_EVAL_DIR)/fast-eval.log"; exit 1; }
+	@cat "$(FAST_EVAL_DIR)/fast-eval.log"
+	@echo ""
+	@echo "fast-eval: scoreboard -> $(FAST_EVAL_DIR)/fast-eval.log"
+	@echo "fast-eval: score json -> $(FAST_EVAL_DIR)/score.json"
+	@echo "fast-eval: run dir    -> $(FAST_EVAL_DIR)"
 
 sbatch: CONFIG_PATH = $(SBATCH_EFFECTIVE_CONFIG_PATH)
 sbatch: DEPLOYMENT_TARGET = slurm
