@@ -77,6 +77,36 @@ class RestartController:
         self.restarts_used = 0
         self.failed_attempts = 0
 
+    def decide(self, t: int, level: int, fails: int,
+               noop_rate_20: float, novelty_rate_30: float,
+               budget_used_frac: float) -> tuple[bool, str, float]:
+        """Restart decision with its reason and the current posterior.
+
+        Returns ``(fire, reason, posterior)``. ``fire=True`` reasons:
+        ``deadline`` (the only fire path in v1). ``fire=False`` reasons:
+        ``disabled``, ``post_clear``, ``before_deadline``, ``min_actions``,
+        ``cap``, ``reserve``, ``posterior``. Behavior is identical to the
+        original ``should_restart`` — this only names the branch taken.
+        """
+        cfg = self.config
+        m = cfg.mixture
+        posterior = posterior_tractable(fails, m["pi"], m["p_E"], m["p_H"])
+        if not cfg.enabled:
+            return False, "disabled", posterior
+        if level > 1:
+            return False, "post_clear", posterior
+        if t < cfg.first_clear_deadline:
+            return False, "before_deadline", posterior
+        if t < cfg.min_actions_before_restart:
+            return False, "min_actions", posterior
+        if self.restarts_used >= cfg.max_restarts_per_pass:
+            return False, "cap", posterior
+        if budget_used_frac > 1.0 - cfg.budget_reserve_frac:
+            return False, "reserve", posterior
+        if posterior < cfg.phi:
+            return False, "posterior", posterior
+        return True, "deadline", posterior
+
     def should_restart(self, t: int, level: int, fails: int,
                        noop_rate_20: float, novelty_rate_30: float,
                        budget_used_frac: float) -> bool:
@@ -88,23 +118,9 @@ class RestartController:
         ``budget_used_frac`` the fraction of the pass budget consumed.
         The covariate rates are currently unused (M2 gating not shipped).
         """
-        cfg = self.config
-        if not cfg.enabled:
-            return False
-        if level > 1:
-            return False  # post_clear_restart is forbidden
-        if t < cfg.first_clear_deadline:
-            return False
-        if t < cfg.min_actions_before_restart:
-            return False
-        if self.restarts_used >= cfg.max_restarts_per_pass:
-            return False
-        if budget_used_frac > 1.0 - cfg.budget_reserve_frac:
-            return False  # no restarts in the final reserve of the budget
-        m = cfg.mixture
-        if posterior_tractable(fails, m["pi"], m["p_E"], m["p_H"]) < cfg.phi:
-            return False  # commit the remaining budget to one long attempt
-        return True
+        fire, _reason, _posterior = self.decide(
+            t, level, fails, noop_rate_20, novelty_rate_30, budget_used_frac)
+        return fire
 
     def record_restart(self) -> None:
         self.restarts_used += 1

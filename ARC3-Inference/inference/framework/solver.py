@@ -35,6 +35,7 @@ from inference.agent.runtime_state import (
     write_runtime_state,
 )
 from inference.agent.tool_agent import ToolAgent
+from inference.framework import observability
 from inference.framework.kaggle import (
     DEFAULT_QWEN_MODEL_DATASET_SOURCE,
     DEFAULT_SERVED_MODEL_NAME,
@@ -54,6 +55,10 @@ from inference.utils.viewer_artifacts import (
 )
 
 AnalyzerFactory = Callable[[taaf.game.Game, int], Any]
+
+import logging
+
+log = logging.getLogger(__name__)
 
 ANALYZER_RETRY_BACKOFF_SECONDS = 1.0
 DEFAULT_CANCEL_DRAIN_TIMEOUT_SECONDS = 120.0
@@ -188,6 +193,8 @@ class _HarnessGameSession:
     _in_step_env: bool = field(default=False, init=False, repr=False)
     _in_analyze: bool = field(default=False, init=False, repr=False)
     _tag_meta_restart: bool = field(default=False, init=False, repr=False)
+    _meta_last_suppressed_reason: str | None = field(default=None, init=False, repr=False)
+    _meta_suppressed_count: int = field(default=0, init=False, repr=False)
 
     def current_frame(self) -> Frame:
         return Frame(
@@ -266,19 +273,43 @@ class _HarnessGameSession:
         elapsed = max(0.0, time.monotonic() - self.started_at)
         return min(1.0, elapsed / self.solver.max_runtime_s_per_game)
 
+    def _meta_log_ids(self) -> tuple[str, int]:
+        run = self.game.game_run
+        return (run.game_id if run is not None else str(self.game_index),
+                self.pass_index)
+
     def _maybe_meta_restart(self) -> None:
         """Issue a meta restart when the policy calls for one.
 
         Fires only from the main play loop (never mid-batch or from inside
         an analyzer callback executing actions) and only when no hard stop
         condition holds, so the disabled path is byte-identical to upstream.
+        Every considered-and-declined decision past the deadline is logged
+        once per reason ([META] suppressed) — silence is not evidence.
         """
         meta = self._meta()
         if meta is None or self._in_step_env or self._in_analyze:
             return
-        if not meta.should_restart(level=_level_number(self.game),
-                                   budget_used_frac=self._budget_used_frac()):
+        fire, reason, posterior = meta.decide(
+            level=_level_number(self.game),
+            budget_used_frac=self._budget_used_frac())
+        game_id, pass_index = self._meta_log_ids()
+        if not fire:
+            # log only decisions where the deadline has passed (the policy
+            # genuinely considered restarting) and dedupe per reason until
+            # the reason changes
+            if reason not in ("before_deadline", "disabled") and \
+                    reason != self._meta_last_suppressed_reason:
+                self._meta_last_suppressed_reason = reason
+                self._meta_suppressed_count += 1
+                observability.meta_suppressed_line(
+                    game_id, pass_index, meta.attempt_action_count, reason)
             return
+        observability.meta_restart_line(
+            game_id, pass_index, meta.attempt_action_count,
+            _level_number(self.game), meta.controller.failed_attempts,
+            posterior, reason)
+        self._meta_last_suppressed_reason = None
         self._tag_meta_restart = True
         try:
             self._execute_auto_reset()
@@ -385,6 +416,38 @@ class _HarnessGameSession:
             self.state_path.unlink(missing_ok=True)
             self._write_analysis_html()
             self.write_viewer_payload()
+            self._record_game_accounting(total_tokens)
+
+    def _record_game_accounting(self, total_tokens: int) -> None:
+        """Per-game accounting row + [BUDGET] line (observability phase 2)."""
+        try:
+            run = self.game.game_run
+            game_id, pass_index = self._meta_log_ids()
+            elapsed = max(0.0, time.monotonic() - self.started_at)
+            meta = self._meta_runtime
+            compaction_stats = getattr(self.analyzer, "_compaction_stats", None)
+            planned = float(self.solver.max_runtime_s_per_game or 0.0)
+            if planned:
+                observability.budget_line(game_id, planned, elapsed)
+            accounting = getattr(self.solver, "_run_accounting", None)
+            if accounting is not None:
+                accounting.record_game(
+                    game=game_id,
+                    pass_index=pass_index,
+                    actions=self.action_count,
+                    tokens=total_tokens,
+                    levels=int(run.levels_completed) if run is not None else 0,
+                    score=run.final_score if run is not None else None,
+                    meta_restarts=(meta.controller.restarts_used if meta else 0),
+                    meta_suppressed=self._meta_suppressed_count,
+                    compaction_ok=(compaction_stats.compaction_events
+                                   if compaction_stats else 0),
+                    compaction_fallbacks=(compaction_stats.compaction_fallbacks
+                                          if compaction_stats else 0),
+                    elapsed_s=elapsed,
+                )
+        except Exception:
+            log.warning("accounting record failed", exc_info=True)
 
     def _finish_if_needed(self) -> None:
         run = self.game.game_run
@@ -1009,6 +1072,19 @@ class HarnessSolver(Solver):
         )
 
     def _setup(self) -> None:
+        from inference.agent.tool_agent import _load_compaction_config
+        from dataclasses import asdict as _asdict
+
+        self._run_accounting = observability.RunAccounting()
+        observability.print_banner(
+            meta_config=self.meta_config,
+            compaction_config=_asdict(_load_compaction_config()),
+            model_id=self.model,
+            max_runtime_s_per_game=self.max_runtime_s_per_game,
+            max_actions_per_game=self.max_actions_per_game,
+            concurrency=self.concurrency,
+            budget_plan=getattr(self, "_budget_plan", None),
+        )
         if self.start_local_server:
             self._start_local_servers()
         self._worker_pool = ThreadPoolExecutor(
@@ -1017,6 +1093,15 @@ class HarnessSolver(Solver):
         )
 
     def _teardown(self) -> None:
+        accounting = getattr(self, "_run_accounting", None)
+        if accounting is not None:
+            granted = None
+            plan = getattr(self, "_budget_plan", None)
+            if plan:
+                granted = plan.get("granted_seconds")
+            elif self.max_runtime_s_per_game:
+                granted = self.max_runtime_s_per_game * max(1, len(accounting.games))
+            accounting.print_block(granted_seconds=granted)
         if self._local_server_started:
             self._stop_local_servers()
         if self._worker_pool is not None:

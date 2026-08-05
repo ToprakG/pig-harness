@@ -57,7 +57,14 @@ class MetaRuntime:
         self.hash_ring.clear()
 
     def should_restart(self, *, level: int, budget_used_frac: float) -> bool:
-        return self.controller.should_restart(
+        fire, _reason, _posterior = self.decide(
+            level=level, budget_used_frac=budget_used_frac)
+        return fire
+
+    def decide(self, *, level: int,
+               budget_used_frac: float) -> tuple[bool, str, float]:
+        """Restart decision with reason + posterior (see policy.decide)."""
+        return self.controller.decide(
             t=self.attempt_action_count,
             level=level,
             fails=self.controller.failed_attempts,

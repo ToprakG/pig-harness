@@ -82,3 +82,50 @@ action efficiency.** Evidence:
 **longer per-game time** (more levels within the single scored pass).
 Adding passes cannot raise the competition score (n_passes is forced to 1
 in the rerun); locally, extra passes only narrow confidence intervals.
+
+## Phase 2 — acceptance evidence (3-game smoke, stub LLM)
+
+Both external providers (DeepInfra, Cerebras) exhausted their credit during
+this phase (402s), so the smoke uses a local OpenAI-compatible stub LLM
+(canned python-tool action calls) — harness, live arcade, meta policy, and
+accounting are fully real; only the model is canned. Config:
+`first_clear_deadline=10, min_actions_before_restart=10, phi=0.25`,
+3 games × 3 min.
+
+Banner (verbatim):
+
+    ==================== RUN CONFIG BANNER ====================
+    meta.enabled=True compaction.enabled=False
+    meta.config={"budget_reserve_frac": 0.25, "enabled": true, "first_clear_deadline": 10, ...}
+    compaction.config={"compaction_call_max_tokens": 900, ..., "enabled": false, ...}
+    model_id=stub-model
+    max_runtime_s_per_game=180.0
+    ...
+
+Sample event lines:
+
+    [META] restart game=ar25-0c556536 pass=0 t=10 level=1 fails=0 posterior=0.360 reason=deadline
+    [META] suppressed game=ar25-0c556536 ... reason=posterior
+    [BUDGET] game=ar25-0c556536 planned=180 used=181 util=101%
+
+Accounting block (verbatim):
+
+    ==================== RUN ACCOUNTING ====================
+    wallclock used=555s granted=540s utilisation=102.9%
+    game=ar25-0c556536 pass=0 actions=206 tokens=4060 levels=0 score=0.0 meta_restarts=1 compaction_ok=0 compaction_fallbacks=0 elapsed_s=181
+    game=lp85-305b61c3 pass=0 actions=0 tokens=215580 levels=0 score=0.0 meta_restarts=0 compaction_ok=0 compaction_fallbacks=0 elapsed_s=181
+    game=sb26-7fbdac44 pass=0 actions=95 tokens=16740 levels=0 score=0.0 meta_restarts=1 compaction_ok=0 compaction_fallbacks=0 elapsed_s=182
+    [META] fired=2 suppressed=4
+    [COMPACT] ok=0 fallback=0
+    generated_tokens_per_sec=425.55 mean_seconds_per_action=1.85
+    ========================================================
+
+Side finding the accounting immediately surfaced: the stub's canned moves
+are invalid for lp85 (0 actions, 216k tokens of retries) — exactly the class
+of silent failure this branch exists to expose. (Stub artifact, not a
+harness bug; ar25/sb26 played normally.)
+
+Answering the mission's fact #2 (why no meta evidence in the 0.91 run):
+the policy had NO stdout logging at all before this phase — restarts were
+tagged only into viewer_data artifacts. With this phase, fired AND
+suppressed decisions are stdout lines.

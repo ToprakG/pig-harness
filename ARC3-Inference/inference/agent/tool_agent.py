@@ -1776,6 +1776,7 @@ class ToolAgent:
             config=cfg,
             stats=self._compaction_stats,
             estimate_tokens=_estimate_tokens,
+            context=getattr(self, "_log_context", "unknown"),
         )
 
     def _compaction_llm_call(self, prompt: str, max_tokens: int,
@@ -1845,6 +1846,11 @@ class ToolAgent:
         if not state_path.exists():
             return None
         self._ensure_session(state_path)
+        # game+pass label for [COMPACT] observability lines
+        suffix = "_tool_runtime_state"
+        self._log_context = (state_path.stem[: -len(suffix)]
+                             if state_path.stem.endswith(suffix)
+                             else state_path.stem)
         self._step_env_callback = step_env
         self._current_valid_actions = _normalize_valid_actions(valid_actions)
 

@@ -169,19 +169,24 @@ def compact(
     config: CompactionConfig,
     stats: CompactionStats,
     estimate_tokens: Callable[[Any], int] | None = None,
+    context: str = "",
 ) -> HistoryDigest:
     """Merge an about-to-be-dropped message block into the digest.
 
     ``llm_call(prompt, max_tokens, timeout_s) -> str`` is supplied by the
     agent and reuses its existing HTTP client and headers. On any failure the
     digest is returned unchanged (upstream silent-drop behavior) and the
-    fallback is logged/counted.
+    fallback is logged/counted. ``context`` labels the [COMPACT] stdout
+    lines (game id + pass, when known).
     """
+    from inference.framework import observability
+
     estimate = estimate_tokens or _default_estimate_tokens
     dropped_text = render_dropped_messages(dropped_messages)
     if not dropped_text.strip():
         return digest
-    if estimate(dropped_text) < config.min_dropped_tokens_to_compact:
+    dropped_tokens = estimate(dropped_text)
+    if dropped_tokens < config.min_dropped_tokens_to_compact:
         return digest  # too small to be worth an LLM call
 
     prompt = build_compaction_prompt(dropped_text, digest.text,
@@ -191,16 +196,23 @@ def compact(
         new_text = llm_call(prompt, config.compaction_call_max_tokens,
                             config.compaction_timeout_s)
     except Exception as exc:
+        latency_ms = int((time.monotonic() - started) * 1000)
         stats.compaction_fallbacks += 1
-        stats.compaction_wallclock_s += time.monotonic() - started
+        stats.compaction_wallclock_s += (time.monotonic() - started)
         logger.warning("compaction_fallback: %s: %s", type(exc).__name__, exc)
+        observability.compact_fallback_line(
+            context, f"{type(exc).__name__}", latency_ms)
         return digest
-    stats.compaction_wallclock_s += time.monotonic() - started
+    latency_ms = int((time.monotonic() - started) * 1000)
+    stats.compaction_wallclock_s += (time.monotonic() - started)
     new_text = str(new_text or "").strip()
     if not new_text:
         stats.compaction_fallbacks += 1
         logger.warning("compaction_fallback: empty compaction response")
+        observability.compact_fallback_line(context, "empty_response", latency_ms)
         return digest
     digest.replace(new_text)
     stats.compaction_events += 1
+    observability.compact_ok_line(context, dropped_tokens, digest.tokens(),
+                                  latency_ms)
     return digest
