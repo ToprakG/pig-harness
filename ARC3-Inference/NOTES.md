@@ -18,3 +18,26 @@ for reproducibility):
   DeepInfra-only request-image cap; inactive on Kaggle (env var unset).
 
 This branch (`fix/observability-and-budget`) is cut from that commit.
+
+## Phase 1 — compaction gating proof
+
+`configs/inference.json` ships `compaction.enabled: false` (verified). All
+three truncation paths route through the single gate:
+
+- `_trim_messages_for_context` → `self._compact_dropped(dropped_blocks)`
+  (tool_agent.py:1752)
+- `_force_reduce_messages` → `self._compact_dropped(dropped)`
+  (tool_agent.py:1830)
+- the `context_overflow_recovered` path calls only the two functions above
+  (tool_agent.py ~1900), so it is transitively gated.
+
+`_compact_dropped` (tool_agent.py:1755) begins with
+`if not cfg.enabled or not dropped: return` — the compaction client
+(`_compaction_llm_call`) is reachable ONLY through `compact()` which is
+called ONLY after that gate. Digest prompt injection is separately gated on
+`self._compaction_config.enabled` in `_build_user_prompt`.
+
+Unit proof: `tests/observability/test_compaction_disabled.py` (3 tests) —
+drives all three paths (including a real server-rejection overflow retry)
+with the compaction client monkeypatched to record calls; zero invocations
+with the flag false.
