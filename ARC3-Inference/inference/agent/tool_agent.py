@@ -138,6 +138,12 @@ def _get_env_float(name: str, default: float) -> float:
 
 _LOCAL_ANALYZER_MAX_OUTPUT = _get_env_int("LOCAL_ANALYZER_MAX_OUTPUT", 0)
 _LOCAL_ANALYZER_CONTEXT_WINDOW = _get_env_int("LOCAL_ANALYZER_CONTEXT_WINDOW", 32768)
+
+
+def _feature_enabled(name: str) -> bool:
+    """Read an experiment toggle. Every new harness behaviour sits behind one so
+    a branch can be A/B'd against main without editing code."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 _LOCAL_ANALYZER_TIMEOUT = _get_env_float("LOCAL_ANALYZER_TIMEOUT", 0.0)
 _LOCAL_ANALYZER_TOOL_STEPS = _get_env_int("LOCAL_ANALYZER_TOOL_STEPS", 12)
 _LOCAL_ANALYZER_TOOL_TIMEOUT = _get_env_int("LOCAL_ANALYZER_TOOL_TIMEOUT", 30)
@@ -1315,6 +1321,47 @@ class ToolAgent:
         }
 
 
+    @staticmethod
+    def _keyboard_nav_lines(valid_actions: list[str] | None) -> list[str]:
+        """Counter-hint for pure directional-control games.
+
+        Evidence (2026-08-05 reference run + Kaggle Phase A rerun): games tagged
+        ``keyboard`` (UP/DOWN/LEFT/RIGHT/SPACE only, no MOUSE) score ~18x worse
+        than ``click`` games (0.12 vs 2.20 mean), and are the only games that
+        finish 20/20 seeds at a dead zero. The generic system prompt tells the
+        model "do not assume a player exists" and "do not frame the objective as
+        reaching a specific row/col" -- correct advice for click/logic puzzles,
+        likely counter-productive for games whose only actions are steps on a
+        grid. This hint narrows that general guidance back down for the specific
+        case where it does not apply.
+        """
+        actions = {str(a).strip().upper() for a in (valid_actions or [])}
+        directional = {"UP", "DOWN", "LEFT", "RIGHT"}
+        if "MOUSE" in actions or not (actions & directional):
+            return []
+        return [
+            (
+                "Valid actions here are directional only (no MOUSE) \u2014 this is very"
+                " likely a navigation game with a controllable avatar or moving object,"
+                " even if no sprite is obviously distinct. Actively test that hypothesis"
+                " first: after 1-2 directional actions, diff `previous_frame` against"
+                " `current_frame` for the single object whose position changed."
+            ),
+            (
+                "If a moving object is confirmed, it is fine here to reason about its"
+                " row/col directly and to target a specific cell or region as the goal"
+                " \u2014 that is the normal way to solve a navigation task, and it does"
+                " not conflict with the general guidance against assuming a player exists"
+                " in non-navigation games."
+            ),
+            (
+                "Once the moving object and a plausible target are identified, write an"
+                " explicit BFS/shortest-path search over the grid rather than moving one"
+                " step at a time by trial and error \u2014 wrong guesses here cost full"
+                " scored actions."
+            ),
+        ]
+
     def _build_user_prompt(
         self,
         action_num: int,
@@ -1369,6 +1416,8 @@ class ToolAgent:
             lines.append("No previous action sequence was captured.")
         else:
             lines.append("No previous sequence has been executed yet.")
+        if _feature_enabled("DUCK_KEYBOARD_NAV_HINTS"):
+            lines.extend(self._keyboard_nav_lines(valid_actions))
         state_line = f"Current state: step {current_step}, level {current_level}"
         if observed_max_level > current_level:
             state_line += f" out of observed max level {observed_max_level} so far"
