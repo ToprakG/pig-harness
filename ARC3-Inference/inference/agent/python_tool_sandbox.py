@@ -353,10 +353,6 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             runtime_globals["valid_actions"] = [str(item) for item in state_payload.get("valid_actions", [])]
             runtime_globals["last_action_result"] = action_result
 
-        runtime_globals["history_search"] = history_search
-        runtime_globals["history_tail"] = history_tail
-        runtime_globals["history_at"] = history_at
-        runtime_globals["history_stats"] = history_stats
 
         def _history_rpc(op, **kwargs):
             # Query the external trajectory log kept by the host: generic
@@ -393,6 +389,10 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             return action_result
 
         runtime_globals["action"] = action
+        runtime_globals["history_search"] = history_search
+        runtime_globals["history_tail"] = history_tail
+        runtime_globals["history_at"] = history_at
+        runtime_globals["history_stats"] = history_stats
         _refresh_state(initial.get("state") or {})
 
         try:

@@ -196,3 +196,24 @@ Guard note: `replicate.py` is added to the genericity guard's exempt list
 alongside `extract.py`. It is offline analysis over `score.json` files and
 is never imported by the agent or the restart policy, so naming games there
 cannot leak into behaviour. Guard remains clean; 50/50 tests pass.
+
+## Phase 5 regression found and fixed (post-merge)
+
+The first ablation ARM A replicate produced `actions=0 tokens=35353` for
+ar25 — the accounting block surfaced it immediately. Cause: **my Phase 5
+change registered the sandbox history helpers BEFORE defining them** in the
+bootstrap source, so every python-tool sandbox died with a NameError
+("Sandbox process exited unexpectedly") and the agent could never act. It
+was invisible to the Phase 5 unit tests because those exercise the
+host-side `_history_handler`, never the sandbox process.
+
+Fix: registration moved after the helper definitions (next to
+`runtime_globals["action"]`). New guard: `tests/observability/
+test_sandbox_smoke.py` runs the REAL sandbox (plain code, runtime globals,
+action(), history RPC round-trip, and helpers-without-handler). Verified by
+reverting the fix: 5/5 of those tests fail on the buggy sandbox, 55/55 pass
+with it restored.
+
+Lesson recorded in REPORT.md §7: a mode that alters the sandbox bootstrap
+must be covered by a test that executes the sandbox, not only its host-side
+handler.

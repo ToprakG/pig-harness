@@ -117,3 +117,11 @@ must come from the replicate protocol in §4, not from a leaderboard move.
   stub LLM (both external API credits were exhausted), so it validates the
   plumbing — banner, event lines, accounting, budget allocation — not model
   behaviour.
+* Post-merge regression (found by the new accounting, fixed, guarded): the
+  Phase 5 sandbox helpers were registered before being defined, killing
+  every python-tool sandbox. Any change to the sandbox bootstrap must be
+  covered by a test that executes the sandbox
+  (`tests/observability/test_sandbox_smoke.py`), not only its host-side
+  handler — the mode unit tests passed while the agent could not act at all.
+  This is also the first thing the new observability layer paid for: a
+  silent zero-action run was previously indistinguishable from a bad model.
