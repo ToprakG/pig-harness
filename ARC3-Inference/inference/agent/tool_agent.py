@@ -1144,6 +1144,47 @@ class ToolAgent:
             ):
                 self._summarized_knowledge[key] = ""
 
+    def turn_action_allowance(self) -> int | None:
+        """How many actions this turn may still execute.
+
+        ``None`` means unlimited (both gates off — upstream behaviour).
+        The batch cap (`agent.max_actions_per_turn`) and the commit gate
+        (`agent.require_plan_before_act`, which allows a single action when
+        the turn carries no hypothesis + expected observation) compose by
+        taking the tighter of the two. The gates never stall the agent: the
+        allowance is never below 1.
+        """
+        limits: list[int] = []
+        if self._max_actions_per_turn is not None:
+            limits.append(int(self._max_actions_per_turn))
+        if self._require_plan_before_act and not self._turn_has_plan:
+            limits.append(1)
+        if not limits:
+            return None
+        return max(1, min(limits) - self._turn_actions_executed)
+
+    def note_turn_actions_executed(self, count: int, withheld: int = 0) -> None:
+        self._turn_actions_executed += max(0, int(count))
+        self._turn_withheld += max(0, int(withheld))
+
+    def turn_is_gated(self) -> bool:
+        """True when the commit gate is the binding constraint this turn."""
+        return bool(self._require_plan_before_act and not self._turn_has_plan)
+
+    def _begin_turn(self) -> None:
+        self._turn_has_plan = False
+        self._turn_actions_executed = 0
+
+    def _register_turn_plan(self, content: str) -> None:
+        """A turn carries a plan when the assistant states, in the SAME turn,
+        a hypothesis and the observation expected if it holds. Parsed with the
+        existing scientist-note parser — no second parser."""
+        note = _extract_scientist_note(content or "")
+        hypothesis = (note.get("world_model") or "").strip()
+        expectation = (note.get("current_plan") or "").strip()
+        if hypothesis and expectation:
+            self._turn_has_plan = True
+
     def set_level_action_count(self, value: int) -> None:
         """Live `actions_per_level[current_level]`, pushed by the solver each
         turn. A stale counter would be worse than none."""
@@ -1765,6 +1806,7 @@ class ToolAgent:
         if not state_path.exists():
             return None
         self._ensure_session(state_path)
+        self._begin_turn()
         self._step_env_callback = step_env
         self._current_valid_actions = _normalize_valid_actions(valid_actions)
 
@@ -1941,6 +1983,7 @@ class ToolAgent:
                 if not tool_calls:
                     if content:
                         self._update_summarized_knowledge_from_assistant(content)
+                        self._register_turn_plan(content)
                         append_transcript("ASSISTANT", content)
                         assistant_message["content"] = content
                     elif reasoning:
@@ -1975,6 +2018,7 @@ class ToolAgent:
 
                 if content:
                     self._update_summarized_knowledge_from_assistant(content)
+                    self._register_turn_plan(content)
                     append_transcript("ASSISTANT", content)
                     assistant_message["content"] = content
                 assistant_message["tool_calls"] = tool_calls

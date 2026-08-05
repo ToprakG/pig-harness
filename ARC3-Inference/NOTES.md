@@ -143,3 +143,47 @@ is off** (removing the block and its separator reproduces it exactly); the
 counter is live and monotonic within a level; the block reports the current
 level; stays under the token budget; leaks no baseline value; contains no
 game identity, colour, shape, or board content.
+
+## Phase 3 — move discipline
+
+Two gates, both env-flagged and ablatable, composing by taking the tighter
+limit and never dropping below 1 action (they must not stall the agent):
+
+* `agent.max_actions_per_turn` (`AGENT_MAX_ACTIONS_PER_TURN`, 2 on this
+  branch) — the batch cap.
+* `agent.require_plan_before_act` (`AGENT_REQUIRE_PLAN_BEFORE_ACT`, true) —
+  a turn may execute more than one action only if the assistant stated, in
+  that same turn, a hypothesis AND the observation expected if it holds.
+  Parsed with the **existing** `_extract_scientist_note` (its `Hypothesis` /
+  `Next test` and `World model` / `Plan` labels) — no second parser.
+
+Withheld actions are returned to the model with an explicit note
+("N queued action(s) were withheld pending re-observation") rather than
+silently dropped, and counted in the end-of-run block.
+
+### Bug found by the first smoke run
+
+The truncation block was inserted *before* `requested_displays` was defined,
+so `step_env` raised `UnboundLocalError` on every gated turn and the agent
+executed **zero** actions (visible as `total_actions=0` with the game's whole
+60 s budget consumed). Fixed by moving the block after the displays are
+built, and covered by `tests/eff/test_step_env_gates.py`, which drives the
+real `step_env` with a fake game — no clock, no server, so it cannot regress
+silently again.
+
+### Smoke result (stub requesting 5 actions per turn, 2 games, 3 min each)
+
+    gates OFF: total_actions=261 analyzer_calls=54  actions_per_call=4.83
+    gates ON : actions=197       analyzer_calls=197 actions_per_call=1.00
+               197/197 [ACT] lines carry gated=1, all with batch=1/5
+
+i.e. the model requested 5-action batches in both runs; with the gates on
+exactly one executed per turn and four were withheld each time.
+**Actions per analyzer call fell 4.83 -> 1.00.**
+
+This is a mechanism check only. Whether spending fewer actions per turn
+raises the SCORE requires the Phase 4 replicate protocol (>= 4 replicates);
+a stub agent cannot answer it, because the stub has no reasoning to
+re-observe with.
+
+Tests: `tests/eff` 22 passed (7 score-awareness, 11 gate logic, 4 step_env).

@@ -189,6 +189,7 @@ class _HarnessGameSession:
     token_baseline: int = 0
     _viewer_events_flushed: int = field(default=0, init=False, repr=False)
     _eff_reported: bool = field(default=False, init=False, repr=False)
+    _turn_gated: bool = field(default=False, init=False, repr=False)
 
     def current_frame(self) -> Frame:
         return Frame(
@@ -668,10 +669,25 @@ class _HarnessGameSession:
         total_reward = 0.0
         stop_reason: str | None = None
         batch_size = len(requested_actions)
+
         requested_displays = [
             _format_action_display(action.id.name, dict(action.data))
             for action in requested_actions
         ]
+        # Move discipline (Phase 3): execute at most the allowance this turn
+        # and hand control back so the agent re-observes before spending more
+        # actions. Under a quadratic action penalty, an un-reobserved action
+        # is the most expensive kind. Never stalls: the allowance is >= 1.
+        allowance = None
+        allowance_fn = getattr(self.analyzer, "turn_action_allowance", None)
+        if allowance_fn is not None:
+            allowance = allowance_fn()
+        self._turn_gated = bool(
+            getattr(self.analyzer, "turn_is_gated", lambda: False)())
+        withheld_actions: list[str] = []
+        if allowance is not None and len(requested_actions) > allowance:
+            withheld_actions = requested_displays[allowance:]
+            requested_actions = requested_actions[:allowance]
 
         for batch_index, action in enumerate(requested_actions, start=1):
             if self.should_stop():
@@ -729,6 +745,21 @@ class _HarnessGameSession:
         final_payload["stopped_early"] = len(executed_payloads) < batch_size
         if stop_reason is not None:
             final_payload["stop_reason"] = stop_reason
+        if withheld_actions:
+            final_payload["withheld_actions"] = withheld_actions
+            final_payload["note"] = (
+                f"{len(withheld_actions)} queued action(s) were withheld pending "
+                "re-observation: inspect the new frame before requesting them "
+                "again. Actions are the only thing that costs score."
+            )
+        notifier = getattr(self.analyzer, "note_turn_actions_executed", None)
+        if notifier is not None:
+            notifier(len(executed_payloads), len(withheld_actions))
+        aggregate = getattr(self.solver, "_run_efficiency", None)
+        if aggregate is not None:
+            aggregate.withheld_actions += len(withheld_actions)
+            if self._turn_gated and executed_payloads:
+                aggregate.gated_turns += 1
         self.write_viewer_payload()
         return final_payload
 
