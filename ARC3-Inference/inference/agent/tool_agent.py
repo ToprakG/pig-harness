@@ -1161,7 +1161,15 @@ class ToolAgent:
             limits.append(1)
         if not limits:
             return None
-        return max(1, min(limits) - self._turn_actions_executed)
+        remaining = min(limits) - self._turn_actions_executed
+        if self._turn_actions_executed == 0:
+            # a turn must always be able to make progress: never stall
+            return max(1, remaining)
+        # the budget is per TURN, not per action() call — the agent may call
+        # action() several times inside one python snippet, and each call is a
+        # separate step_env. Once the turn's budget is spent, further calls
+        # execute nothing and are told to re-observe.
+        return max(0, remaining)
 
     def note_turn_actions_executed(self, count: int, withheld: int = 0) -> None:
         self._turn_actions_executed += max(0, int(count))

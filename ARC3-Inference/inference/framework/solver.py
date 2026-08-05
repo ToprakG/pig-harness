@@ -688,6 +688,31 @@ class _HarnessGameSession:
         if allowance is not None and len(requested_actions) > allowance:
             withheld_actions = requested_displays[allowance:]
             requested_actions = requested_actions[:allowance]
+        if allowance is not None and allowance <= 0:
+            # turn budget spent: withhold everything and hand control back so
+            # the agent re-observes. Not an error — an error payload would
+            # invite a retry storm.
+            notifier = getattr(self.analyzer, "note_turn_actions_executed", None)
+            if notifier is not None:
+                notifier(0, len(withheld_actions))
+            aggregate = getattr(self.solver, "_run_efficiency", None)
+            if aggregate is not None:
+                aggregate.withheld_actions += len(withheld_actions)
+            return {
+                "executed": False,
+                "action_num": self.action_count,
+                "level": _level_number(self.game),
+                "score": int(self.game.current_state.levels_completed),
+                "valid_actions": to_model_actions(_engine_action_names(self.game)),
+                "board_changed": False,
+                "withheld_actions": withheld_actions,
+                "note": (
+                    "This turn's action budget is spent. All requested actions "
+                    "were withheld: re-observe `current_frame` and act next "
+                    "turn. Actions are the only thing that costs score."
+                ),
+                **self.timing_payload(),
+            }
 
         for batch_index, action in enumerate(requested_actions, start=1):
             if self.should_stop():

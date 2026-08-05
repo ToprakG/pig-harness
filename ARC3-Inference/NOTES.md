@@ -212,3 +212,44 @@ Verified on synthetic score files: 4 replicates -> summarised;
 paired diff +0.750 flagged significant; 1 replicate -> `sufficient=False`.
 
 Acceptance for all phases met. `pytest tests/eff -q` -> 22 passed.
+
+## Real-model test (Arm E) — and the bug it exposed
+
+First run of this branch against a real model (DeepInfra Qwen3.6-27B,
+text-only, 20 min/game, score-awareness + cap 2 + commit gate all ON):
+
+    [finished] ar25-0c556536 level=1/8 score=1.05 actions=113
+    [EFF] game=ar25-0c556536 levels=1/8 a_per_level=52,61,...
+          base_per_level=32,50,... human_mult_per_level=1.62,1.22,...
+          cleared_human_mult=1.62 score=1.0519 score_if_1x=2.7778
+          headroom=1.7258
+    total_actions=113 analyzer_calls=17 actions_per_call=6.65
+    gated_turns=53 withheld_actions=0
+
+Good: a level was actually cleared, so the efficiency fields are real for the
+first time — 52 actions against a 32-action human baseline (1.62x), worth
+1.05 where perfect efficiency would have scored 2.78.
+
+**Bug the telemetry caught: the batch cap did not bind.** 6.65 actions per
+analyzer call with `max_actions_per_turn=2`. Cause: the agent may call
+`action()` several times inside one Python snippet (the prompt explicitly
+permits it) and each call is a separate `step_env`; my
+`turn_action_allowance()` had a `max(1, ...)` floor, so after the turn budget
+was spent every further call still executed one more action. The cap was
+therefore per-call, not per-turn — the opposite of the spec ("execute at most
+one action that turn").
+
+Fix: the floor of 1 now applies only while the turn has executed nothing (so
+a turn can always make progress); afterwards the allowance goes to 0 and
+`step_env` returns a *non-error* withheld payload telling the agent to
+re-observe. An error payload was deliberately avoided: it would invite a
+retry storm.
+
+Covered by `tests/eff/test_move_discipline.py::test_cap_is_per_turn_not_per_action_call`
+and `tests/eff/test_step_env_gates.py::test_budget_spent_withholds_everything_without_erroring`.
+`pytest tests/eff -q` -> 23 passed.
+
+Also worth recording: `gated_turns=53` means the commit gate was the binding
+constraint on 53 turns — with a real model the gate DOES open (Qwen emits a
+hypothesis plus an expected observation), it just did not restrict much while
+the cap was broken.

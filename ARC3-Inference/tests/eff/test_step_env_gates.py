@@ -131,3 +131,18 @@ def test_level_action_counter_is_the_live_denominator(tmp_path):
     session = make_session(tmp_path, analyzer)
     session.step_env(dict(BATCH))
     assert session._level_actions(1) == 2      # actions_per_level[0]
+
+
+def test_budget_spent_withholds_everything_without_erroring(tmp_path):
+    """Second action() call in the same turn: nothing executes, the model is
+    told to re-observe, and it is NOT an error payload (an error would invite
+    a retry storm)."""
+    analyzer = FakeAnalyzer(allowance=0)
+    session = make_session(tmp_path, analyzer)
+    payload = session.step_env(dict(BATCH))
+    assert payload["executed"] is False
+    assert "error" not in payload
+    assert len(payload["withheld_actions"]) == 5
+    assert "budget is spent" in payload["note"]
+    assert session.game.game_run.history == []          # nothing ran
+    assert session.solver._run_efficiency.withheld_actions == 5

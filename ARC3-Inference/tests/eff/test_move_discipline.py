@@ -44,11 +44,19 @@ def test_no_cap_by_default_means_unlimited():
     assert agent.turn_action_allowance() is None
 
 
-def test_cap_limits_actions_per_turn():
+def test_cap_is_per_turn_not_per_action_call():
+    """The agent may call action() several times inside one python snippet;
+    each call is a separate step_env. The budget must be spent per TURN,
+    otherwise the cap never binds (observed live: 6.65 actions/analyzer call
+    with cap=2)."""
     agent = make_agent(cap="2")
     assert agent.turn_action_allowance() == 2
-    agent.note_turn_actions_executed(2)
-    assert agent.turn_action_allowance() == 1   # never below 1: no stalling
+    agent.note_turn_actions_executed(1)
+    assert agent.turn_action_allowance() == 1
+    agent.note_turn_actions_executed(1)
+    assert agent.turn_action_allowance() == 0   # budget spent: withhold
+    agent._begin_turn()
+    assert agent.turn_action_allowance() == 2   # fresh turn, fresh budget
 
 
 def test_cap_resets_each_turn():
@@ -104,12 +112,16 @@ def test_gates_compose_to_the_tighter_limit():
     assert agent.turn_action_allowance() == 2       # cap is now the binder
 
 
-def test_allowance_never_stalls_the_agent():
+def test_every_turn_can_always_make_progress():
+    """No stall: a fresh turn always permits at least one action, however
+    tight the gates. Within a turn the budget may reach zero — that hands
+    control back to re-observe, it does not stop the run."""
     agent = make_agent(cap="1", require_plan=True)
     for _ in range(5):
-        allowance = agent.turn_action_allowance()
-        assert allowance >= 1
-        agent.note_turn_actions_executed(allowance)
+        agent._begin_turn()
+        assert agent.turn_action_allowance() >= 1
+        agent.note_turn_actions_executed(1)
+        assert agent.turn_action_allowance() == 0
 
 
 def test_withheld_bookkeeping():
