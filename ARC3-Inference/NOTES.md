@@ -187,3 +187,28 @@ a stub agent cannot answer it, because the stub has no reasoning to
 re-observe with.
 
 Tests: `tests/eff` 22 passed (7 score-awareness, 11 gate logic, 4 step_env).
+
+## Phase 4 — simulator and replicate protocol
+
+`inference/eff/replay_score.py --run ../example-run`:
+
+    runs=500 baselines_hidden=0
+    score=800.1018  score_if_1x=1207.1140  headroom=407.0122
+      alpha=0.5: score=1071.9107 (1.34x actual)
+      alpha=0.7: score=962.2464 (1.20x actual)
+      alpha=1.0: score=800.1018 (1.00x actual)
+    formula check: recomputed scores match benchmark.json and score.json exactly
+
+It also ranks the runs with the most headroom — i.e. the cleared levels that
+were most expensive. Top of that list on the historical data: sc25 p10
+(2 levels, 200 actions, human_mult 2.50, score 2.29 vs if_1x 14.29) and four
+vc33 passes (human_mult 2.4–4.0, score 1.2–2.1 vs if_1x 10.71). These are the
+concrete targets efficiency work should move.
+
+`inference/eff/replicate.py`: `summarise` (mean/sd/SE + bootstrap 95% CI over
+replicate run means) and `compare` (paired per-game differences, bootstrap
+CI), both printing `INSUFFICIENT` below `--min-replicates` (default 4).
+Verified on synthetic score files: 4 replicates -> summarised;
+paired diff +0.750 flagged significant; 1 replicate -> `sufficient=False`.
+
+Acceptance for all phases met. `pytest tests/eff -q` -> 22 passed.
