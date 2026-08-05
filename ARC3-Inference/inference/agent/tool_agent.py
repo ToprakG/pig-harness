@@ -33,6 +33,7 @@ from inference.agent.vision_context import (
 from inference.agent.programmatic_memory import ProgrammaticMemory, resolve_programmatic_log_path
 from inference.agent.python_tool_sandbox import run_sandboxed_python
 from inference.agent.runtime_state import Frame, HistoryEntry, RUNTIME_STATE_FILENAME, load_runtime_state
+from inference.utils.grid_utils import ARC_COLOR_CHARS
 from inference.utils.openai_compat import build_chat_payload, build_headers, normalize_provider
 
 log = logging.getLogger(__name__)
@@ -138,6 +139,12 @@ def _get_env_float(name: str, default: float) -> float:
 
 _LOCAL_ANALYZER_MAX_OUTPUT = _get_env_int("LOCAL_ANALYZER_MAX_OUTPUT", 0)
 _LOCAL_ANALYZER_CONTEXT_WINDOW = _get_env_int("LOCAL_ANALYZER_CONTEXT_WINDOW", 32768)
+
+
+def _feature_enabled(name: str) -> bool:
+    """Read an experiment toggle. Every new harness behaviour sits behind one so
+    a branch can be A/B'd against main without editing code."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 _LOCAL_ANALYZER_TIMEOUT = _get_env_float("LOCAL_ANALYZER_TIMEOUT", 0.0)
 _LOCAL_ANALYZER_TOOL_STEPS = _get_env_int("LOCAL_ANALYZER_TOOL_STEPS", 12)
 _LOCAL_ANALYZER_TOOL_TIMEOUT = _get_env_int("LOCAL_ANALYZER_TOOL_TIMEOUT", 30)
@@ -1315,6 +1322,127 @@ class ToolAgent:
         }
 
 
+    @staticmethod
+    def _dead_action_lines(
+        history_entries: list[HistoryEntry],
+        current_frame: Frame | None,
+    ) -> list[str]:
+        """Name actions already observed to leave *this* board untouched.
+
+        Derived from history on every call rather than accumulated in a field,
+        so it cannot drift out of sync with the frames the model is shown.
+        ``history[i].frame`` is the board *after* ``history[i].action``, so an
+        action is dead when it left the preceding frame's grid unchanged. Index
+        0 is skipped: the seed frame is not in history, so its predecessor is
+        unknown.
+        """
+        if current_frame is None or len(history_entries) < 2:
+            return []
+        current_grid = current_frame.grid
+        if not current_grid:
+            return []
+        dead: list[str] = []
+        for index in range(1, len(history_entries)):
+            before = history_entries[index - 1].frame
+            after = history_entries[index].frame
+            if before is None or after is None:
+                continue
+            if before.grid != current_grid or after.grid != before.grid:
+                continue
+            name = str(history_entries[index].action or "").strip()
+            if name and name not in dead:
+                dead.append(name)
+        if not dead:
+            return []
+        return [
+            (
+                "Actions already observed to leave this exact board unchanged: "
+                f"{', '.join(dead[:10])}. Repeating one spends a scored action for no "
+                "information \u2014 prefer an untried action, or explain what new evidence "
+                "makes you expect a different result this time."
+            )
+        ]
+
+    @staticmethod
+    def _static_region_lines(
+        history_entries: list[HistoryEntry],
+        current_frame: Frame | None,
+    ) -> list[str]:
+        """Split the board into the layer that moves and the layer that never has.
+
+        Observed failure mode: the model reliably infers what its actions *do*
+        (e.g. "red shifts the ring clockwise") and then stalls on "Goal model:
+        Unknown". Goals in these games are usually expressed in the cells that
+        never change -- markers, slots, a target pattern -- while the cells that
+        do change are the state being manipulated. Separating the two is cheap
+        here and costs the model several tool calls to redo by hand every turn.
+
+        Only frames from the current level are compared; a level change replaces
+        the whole layout, so mixing them would mark everything volatile.
+        """
+        if current_frame is None or not current_frame.grid:
+            return []
+        level = current_frame.level
+        frames = [
+            entry.frame
+            for entry in history_entries
+            if entry.frame is not None
+            and entry.frame.level == level
+            and entry.frame.shape == current_frame.shape
+        ]
+        frames.append(current_frame)
+        if len(frames) < 3:
+            return []
+
+        volatile_colors: set[int] = set()
+        static_colors: set[int] = set()
+        volatile_cells = 0
+        total_cells = 0
+        baseline = frames[0].grid
+        for row_index, row in enumerate(baseline):
+            for col_index, value in enumerate(row):
+                total_cells += 1
+                seen = {value}
+                for frame in frames[1:]:
+                    try:
+                        seen.add(frame.grid[row_index][col_index])
+                    except IndexError:
+                        continue
+                if len(seen) > 1:
+                    volatile_cells += 1
+                    volatile_colors |= seen
+                else:
+                    static_colors.add(value)
+        if not volatile_cells:
+            return []
+
+        only_static = sorted(static_colors - volatile_colors)
+        if not only_static:
+            return []
+
+        def render(color_ids: list[int]) -> str:
+            return ", ".join(
+                ARC_COLOR_CHARS[value] if 0 <= value < len(ARC_COLOR_CHARS) else str(value)
+                for value in color_ids
+            )
+
+        return [
+            (
+                f"Board dynamics on this level (over {len(frames)} observed frames): "
+                f"{volatile_cells} of {total_cells} cells have ever changed."
+            ),
+            (
+                f"Colors appearing ONLY in cells that have never changed: {render(only_static)}. "
+                f"Colors appearing in cells that do change: {render(sorted(volatile_colors))}."
+            ),
+            (
+                "The never-changed layer is structure, HUD, or goal markers \u2014 not state you"
+                " control. If you know what your actions do but not what wins, the target is"
+                " most likely encoded there: check whether the changing colors have to be"
+                " brought into some relation with the fixed ones."
+            ),
+        ]
+
     def _build_user_prompt(
         self,
         action_num: int,
@@ -1361,6 +1489,28 @@ class ToolAgent:
                 lines.append("You have completed the run!")
             elif previous_step_summary.get("level_transition"):
                 lines.append("You have progressed to a new level!")
+                if _feature_enabled("DUCK_LEVEL_CARRYOVER"):
+                    lines.extend(
+                        [
+                            (
+                                "This is the highest-value moment in the run: level weight grows"
+                                " with the level number, so what you carry forward now decides"
+                                " the score."
+                            ),
+                            (
+                                "Before acting, restate in the world model: (1) which mechanics"
+                                " you CONFIRMED on the level you just cleared, (2) which of them"
+                                " you expect to still hold, (3) what the winning move sequence"
+                                " was in general terms. Keep this even as older turns are evicted."
+                            ),
+                            (
+                                "Then re-ground on the new board from scratch. The layout, object"
+                                " positions, and goal placement have almost certainly changed;"
+                                " only the underlying rules tend to carry over. Do not replay the"
+                                " previous level's exact move sequence."
+                            ),
+                        ]
+                    )
             else:
                 lines.append("You are still on the same level.")
             if previous_step_summary.get("game_over"):
@@ -1369,6 +1519,10 @@ class ToolAgent:
             lines.append("No previous action sequence was captured.")
         else:
             lines.append("No previous sequence has been executed yet.")
+        if _feature_enabled("DUCK_DEAD_ACTION_HINTS"):
+            lines.extend(self._dead_action_lines(history_entries, current_frame))
+        if _feature_enabled("DUCK_STATIC_REGION_HINTS"):
+            lines.extend(self._static_region_lines(history_entries, current_frame))
         state_line = f"Current state: step {current_step}, level {current_level}"
         if observed_max_level > current_level:
             state_line += f" out of observed max level {observed_max_level} so far"

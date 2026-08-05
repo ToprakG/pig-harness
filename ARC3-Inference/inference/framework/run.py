@@ -617,6 +617,33 @@ def _competition_arcade_enabled(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "simulate_competition_arcade", False))
 
 
+def _online_arcade_enabled(args: argparse.Namespace) -> bool:
+    if bool(getattr(args, "online_arcade", False)):
+        return True
+    return os.environ.get("ARC_ONLINE", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _online_arcade_spec(args: argparse.Namespace) -> taaf.game_api.ArcadeSpec:
+    """Play against the live ARC-AGI-3 API instead of local env files.
+
+    The offline env JSON files are not bundled in this build, so ONLINE is the
+    only way to run without a competition simulator.
+
+    ``environments_dir`` points at a dedicated empty directory rather than "".
+    An empty value makes ``arc_agi`` scan the working directory for
+    ``metadata.json``, which walks into ``.venv`` and logs a validation
+    traceback for every installed package's dist-info. Harmless but it buries
+    real errors, and games come from the API in this mode anyway.
+    """
+    scan_dir = Path(os.environ.get("ARC_ONLINE_SCAN_DIR", "").strip() or ".arc-online-empty")
+    scan_dir.mkdir(parents=True, exist_ok=True)
+    return taaf.game_api.ArcadeSpec(
+        operation_mode=arc_agi.OperationMode.ONLINE,
+        arc_base_url=os.environ.get("ARC_BASE_URL", "").strip() or "https://three.arcprize.org",
+        environments_dir=str(scan_dir),
+    )
+
+
 def _competition_arcade_module() -> Any:
     try:
         import taaf.competition_arcade as competition_arcade
@@ -634,6 +661,8 @@ def _enter_competition_arcade(
     stack: contextlib.ExitStack,
 ) -> tuple[list[str], taaf.game_api.ArcadeSpec | None]:
     if not _competition_arcade_enabled(args):
+        if _online_arcade_enabled(args):
+            return game_ids, _online_arcade_spec(args)
         return game_ids, None
     if str(args.deployment_target).strip().lower() != "inline":
         raise ValueError(
@@ -1262,6 +1291,16 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Run against TAAF's localhost competition Arcade simulator. Inline target only.",
+    )
+    parser.add_argument(
+        "--online-arcade",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Play against the live ARC-AGI-3 API (needs ARC_API_KEY). Required "
+            "locally because offline env files are not bundled. Also settable "
+            "with ARC_ONLINE=1."
+        ),
     )
     parser.add_argument(
         "--competition-clone-runs",

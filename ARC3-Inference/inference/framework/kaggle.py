@@ -137,6 +137,11 @@ def duck_kaggle_setup_command(config: DuckKaggleVllmConfig | None = None) -> str
         "__LOCAL_ANALYZER_ENABLE_THINKING__": repr(os.environ.get("LOCAL_ANALYZER_ENABLE_THINKING", "1")),
         "__MULTIMODAL_CONTEXT__": repr(os.environ.get("MULTIMODAL_CONTEXT", "current_grid")),
         "__MULTIMODAL_UPSCALE__": repr(os.environ.get("MULTIMODAL_UPSCALE", "4")),
+        # Harness experiment toggles, carried from the deploy environment so a
+        # submission can enable one without a code change. Default off.
+        "__DUCK_DEAD_ACTION_HINTS__": repr(os.environ.get("DUCK_DEAD_ACTION_HINTS", "")),
+        "__DUCK_LEVEL_CARRYOVER__": repr(os.environ.get("DUCK_LEVEL_CARRYOVER", "")),
+        "__DUCK_STATIC_REGION_HINTS__": repr(os.environ.get("DUCK_STATIC_REGION_HINTS", "")),
         "__VLLM_TENSOR_PARALLEL_SIZE__": repr(int(cfg.tensor_parallel_size)),
         "__WHEELHOUSE_STAMP_TEXT__": repr(cfg.wheelhouse_stamp_text),
         "__VLLM_TOOL_CALL_PARSER__": repr(cfg.tool_call_parser),
@@ -205,6 +210,9 @@ def duck_kaggle_remote_setup_command() -> str:
         "__LOCAL_ANALYZER_ENABLE_THINKING__": repr(os.environ.get("LOCAL_ANALYZER_ENABLE_THINKING", "0")),
         "__MULTIMODAL_CONTEXT__": repr(os.environ.get("MULTIMODAL_CONTEXT", "current_grid")),
         "__MULTIMODAL_UPSCALE__": repr(os.environ.get("MULTIMODAL_UPSCALE", "16")),
+        "__DUCK_DEAD_ACTION_HINTS__": repr(os.environ.get("DUCK_DEAD_ACTION_HINTS", "")),
+        "__DUCK_LEVEL_CARRYOVER__": repr(os.environ.get("DUCK_LEVEL_CARRYOVER", "")),
+        "__DUCK_STATIC_REGION_HINTS__": repr(os.environ.get("DUCK_STATIC_REGION_HINTS", "")),
     }
     script = _DUCK_REMOTE_SETUP_SCRIPT
     for placeholder, value in replacements.items():
@@ -517,6 +525,9 @@ setup_env = {
     'LOCAL_ANALYZER_ENABLE_THINKING': __LOCAL_ANALYZER_ENABLE_THINKING__,
     'MULTIMODAL_CONTEXT': __MULTIMODAL_CONTEXT__,
     'MULTIMODAL_UPSCALE': __MULTIMODAL_UPSCALE__,
+    'DUCK_DEAD_ACTION_HINTS': __DUCK_DEAD_ACTION_HINTS__,
+    'DUCK_LEVEL_CARRYOVER': __DUCK_LEVEL_CARRYOVER__,
+    'DUCK_STATIC_REGION_HINTS': __DUCK_STATIC_REGION_HINTS__,
 }
 setup_env_path = Path(os.environ['TAAF_KAGGLE_SETUP_ENV'])
 existing_setup_env = {}
@@ -602,6 +613,9 @@ setup_env = {
     'LOCAL_ANALYZER_ENABLE_THINKING': __LOCAL_ANALYZER_ENABLE_THINKING__,
     'MULTIMODAL_CONTEXT': __MULTIMODAL_CONTEXT__,
     'MULTIMODAL_UPSCALE': __MULTIMODAL_UPSCALE__,
+    'DUCK_DEAD_ACTION_HINTS': __DUCK_DEAD_ACTION_HINTS__,
+    'DUCK_LEVEL_CARRYOVER': __DUCK_LEVEL_CARRYOVER__,
+    'DUCK_STATIC_REGION_HINTS': __DUCK_STATIC_REGION_HINTS__,
 }
 setup_env_path = Path(os.environ['TAAF_KAGGLE_SETUP_ENV'])
 existing_setup_env = {}

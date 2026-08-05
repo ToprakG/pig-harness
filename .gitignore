@@ -19,3 +19,6 @@ node_modules/
 
 # OS
 .DS_Store
+
+# ARC_ONLINE mode: dummy scan dir arc_agi requires when environments_dir is set
+ARC3-Inference/.arc-online-empty/
