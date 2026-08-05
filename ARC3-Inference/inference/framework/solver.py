@@ -35,6 +35,7 @@ from inference.agent.runtime_state import (
     write_runtime_state,
 )
 from inference.agent.tool_agent import ToolAgent
+from inference.eff import telemetry as eff_telemetry
 from inference.framework.kaggle import (
     DEFAULT_QWEN_MODEL_DATASET_SOURCE,
     DEFAULT_SERVED_MODEL_NAME,
@@ -54,6 +55,10 @@ from inference.utils.viewer_artifacts import (
 )
 
 AnalyzerFactory = Callable[[taaf.game.Game, int], Any]
+
+import logging
+
+log = logging.getLogger(__name__)
 
 ANALYZER_RETRY_BACKOFF_SECONDS = 1.0
 DEFAULT_CANCEL_DRAIN_TIMEOUT_SECONDS = 120.0
@@ -183,6 +188,7 @@ class _HarnessGameSession:
     last_engine_action: str | None = None
     token_baseline: int = 0
     _viewer_events_flushed: int = field(default=0, init=False, repr=False)
+    _eff_reported: bool = field(default=False, init=False, repr=False)
 
     def current_frame(self) -> Frame:
         return Frame(
@@ -288,6 +294,9 @@ class _HarnessGameSession:
                     analysis_step = retry_analysis_step
 
                 self.write_runtime_state()
+                setter = getattr(self.analyzer, "set_level_action_count", None)
+                if setter is not None:
+                    setter(self._level_actions(_level_number(self.game)))
                 transcript_before = self._read_transcript_bytes()
                 try:
                     result = self.analyzer.analyze(
@@ -336,6 +345,69 @@ class _HarnessGameSession:
             self.state_path.unlink(missing_ok=True)
             self._write_analysis_html()
             self.write_viewer_payload()
+            self._emit_efficiency_summary()
+
+    def _game_id(self) -> str:
+        run = self.game.game_run
+        return run.game_id if run is not None else str(self.game_index)
+
+    def _level_actions(self, level: int) -> int:
+        """Live value of actions_per_level for the current level — the
+        denominator the score is divided by."""
+        run = self.game.game_run
+        if run is None:
+            return 0
+        per_level = list(getattr(run, "actions_per_level", []) or [])
+        idx = max(0, int(run.levels_completed))
+        return per_level[idx] if idx < len(per_level) else 0
+
+    def _emit_action_telemetry(self, payload: dict[str, Any], board_changed: bool,
+                               batch_index: int, batch_size: int) -> None:
+        try:
+            level = _level_number(self.game)
+            eff_telemetry.action_line(
+                game_id=self._game_id(),
+                t=int(payload.get("action_num") or self.action_count),
+                level=level,
+                lvl_actions=self._level_actions(level),
+                changed=board_changed,
+                batch_index=batch_index,
+                batch_size=batch_size,
+                analysis_step=self.analysis_step,
+                gated=bool(getattr(self, "_turn_gated", False)),
+            )
+        except Exception:
+            log.warning("action telemetry failed", exc_info=True)
+
+    def _emit_efficiency_summary(self) -> None:
+        """One [EFF] line per game, plus run-level aggregation."""
+        if self._eff_reported:
+            return
+        self._eff_reported = True
+        try:
+            run = self.game.game_run
+            if run is None:
+                return
+            payload = eff_telemetry.efficiency_line(
+                game_id=self._game_id(),
+                pass_index=self.pass_index,
+                levels_completed=int(run.levels_completed),
+                number_of_levels=int(run.number_of_levels),
+                actions_per_level=list(getattr(run, "actions_per_level", []) or []),
+                base_actions_per_level=getattr(run, "base_actions_per_level", None),
+                score=run.final_score,
+            )
+            planned = float(self.solver.max_runtime_s_per_game or 0.0)
+            if planned:
+                eff_telemetry.budget_line(
+                    game_id=self._game_id(), planned_s=planned,
+                    used_s=max(0.0, time.monotonic() - self.started_at))
+            aggregate = getattr(self.solver, "_run_efficiency", None)
+            if aggregate is not None:
+                aggregate.record_game(payload, actions=self.action_count,
+                                      analysis_steps=self.analysis_step)
+        except Exception:
+            log.warning("efficiency summary failed", exc_info=True)
 
     def _finish_if_needed(self) -> None:
         run = self.game.game_run
@@ -728,6 +800,7 @@ class _HarnessGameSession:
             "batch_size": batch_size,
             **self.timing_payload(),
         }
+        self._emit_action_telemetry(payload, board_changed, batch_index, batch_size)
         self._append_action_viewer_event(payload, current_frame)
         if flush_viewer_payload:
             self.write_viewer_payload()
@@ -941,6 +1014,10 @@ class HarnessSolver(Solver):
         )
 
     def _setup(self) -> None:
+        granted = None
+        if self.max_runtime_s_per_game:
+            granted = float(self.max_runtime_s_per_game)
+        self._run_efficiency = eff_telemetry.RunEfficiency(granted_seconds=granted)
         if self.start_local_server:
             self._start_local_servers()
         self._worker_pool = ThreadPoolExecutor(
@@ -949,6 +1026,9 @@ class HarnessSolver(Solver):
         )
 
     def _teardown(self) -> None:
+        aggregate = getattr(self, "_run_efficiency", None)
+        if aggregate is not None:
+            aggregate.print_block()
         if self._local_server_started:
             self._stop_local_servers()
         if self._worker_pool is not None:

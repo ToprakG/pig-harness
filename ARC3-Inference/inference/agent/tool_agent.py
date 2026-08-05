@@ -955,6 +955,22 @@ class ToolAgent:
         self._last_step_summary: dict[str, Any] | None = None
         self._last_action_result: dict[str, Any] | None = None
         self._summarized_knowledge = _empty_world_model()
+        # Phase 2/3 flags (env-driven, ablatable; see configs/inference.json
+        # "agent" block wired through the Makefile).
+        self._score_awareness_enabled = self._agent_flag(
+            "AGENT_SCORE_AWARENESS_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+        raw_cap = self._agent_flag("AGENT_MAX_ACTIONS_PER_TURN", "")
+        self._max_actions_per_turn = int(raw_cap) if raw_cap.isdigit() and int(raw_cap) > 0 else None
+        self._require_plan_before_act = self._agent_flag(
+            "AGENT_REQUIRE_PLAN_BEFORE_ACT", "0").lower() in {"1", "true", "yes", "on"}
+        self._level_action_count = 0
+        self._turn_has_plan = False
+        self._turn_actions_executed = 0
+        self._turn_withheld = 0
+
+    @staticmethod
+    def _agent_flag(name: str, default: str) -> str:
+        return str(os.environ.get(name, default)).strip()
 
     def _headers(self) -> dict[str, str]:
         api_key = (
@@ -984,6 +1000,7 @@ class ToolAgent:
             self._last_step_summary = None
             self._last_action_result = None
             self._summarized_knowledge = _empty_world_model()
+            self._level_action_count = 0
 
     @property
     def total_tokens(self) -> int:
@@ -1127,6 +1144,33 @@ class ToolAgent:
             ):
                 self._summarized_knowledge[key] = ""
 
+    def set_level_action_count(self, value: int) -> None:
+        """Live `actions_per_level[current_level]`, pushed by the solver each
+        turn. A stale counter would be worse than none."""
+        self._level_action_count = max(0, int(value or 0))
+
+    def _score_awareness_lines(self, current_level: int) -> list[str]:
+        """Environment information the agent is otherwise missing: actions are
+        quadratically penalised, thinking is free.
+
+        This is a property of the scoring function, not of any particular
+        game — no board content, colours, shapes, or game identity. The live
+        per-level action count is injected fresh each turn (a stale counter
+        would be worse than none). Baseline values are deliberately NOT shown:
+        they may be hidden by the engine, and showing them invites gaming a
+        target rather than genuine efficiency.
+        """
+        if not self._score_awareness_enabled:
+            return []
+        spent = int(self._level_action_count or 0)
+        return [
+            "SCORING: each completed level scores "
+            "min(115, (human_baseline/your_actions)^2 * 100). Actions are the "
+            "ONLY cost; thinking, inspecting variables and re-reading history "
+            "are FREE. An action that does not advance you is a permanent "
+            f"quadratic loss. Level {current_level}; actions spent on it: {spent}."
+        ]
+
     def _summarized_knowledge_lines(self) -> list[str]:
         entries = [
             ("World model", self._summarized_knowledge.get("world_model", "")),
@@ -1236,6 +1280,7 @@ class ToolAgent:
             "but stop immediately if a result reports `game_over`, `run_complete`, `level_completed`, or `done`."
         )
         lines.extend(self._summarized_knowledge_lines())
+        lines.extend(self._score_awareness_lines(current_level))
         lines.append("end of world model. ")
         if action_num == 0:
             lines.append(
