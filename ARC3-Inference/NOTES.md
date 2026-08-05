@@ -182,3 +182,17 @@ conditioning in executable code.
 **No winner declared.** Per the mission's measurement rule this needs the
 Phase 6 replicate protocol (≥4 replicates); the smoke runs only prove the
 mechanics work.
+
+## Phase 6 — replicate protocol
+
+`inference/meta/replicate.py`: `summarise` (mean/sd/SE + bootstrap 95% CI
+over replicate run means) and `compare` (paired per-game differences with a
+bootstrap CI). Both refuse to support a decision below `--min-replicates`
+(default 4), printing `INSUFFICIENT`. Verified on synthetic score files:
+4 replicates → mean 1.050, se 0.022; paired diff +0.833, CI [0.50, 1.00],
+significant; 1 replicate → `sufficient=False`.
+
+Guard note: `replicate.py` is added to the genericity guard's exempt list
+alongside `extract.py`. It is offline analysis over `score.json` files and
+is never imported by the agent or the restart policy, so naming games there
+cannot leak into behaviour. Guard remains clean; 50/50 tests pass.

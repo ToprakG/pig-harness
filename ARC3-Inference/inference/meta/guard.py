@@ -40,7 +40,9 @@ WHITELIST = frozenset({
 FORBIDDEN_TOKENS = ("board_ascii", "color", "shape", "game_id")
 # extract.py: the ingestion boundary that reduces raw boards to hashes.
 # guard.py: must spell the forbidden tokens to ban them.
-EXEMPT_FILES = ("extract.py", "guard.py")
+# replicate.py: offline analysis over score.json files; never imported by the
+#   agent or the policy, so naming games there cannot leak into behaviour.
+EXEMPT_FILES = ("extract.py", "guard.py", "replicate.py")
 PRAGMA = "# guard-ok:"
 
 _TOKEN_RES = {tok: re.compile(rf"\b{tok}\w*", re.IGNORECASE)
