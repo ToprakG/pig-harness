@@ -17,6 +17,7 @@ from inference.agent.action_names import to_engine_action, to_model_action
 from inference.agent.prompts import (
     COMPACT_TOOL_SESSION_ADDENDUM,
     GAME_OVERVIEW_ADDENDUM,
+    PROLONG_MEMORY_ADDENDUM,
     PYTHON_ADDENDUM,
     STRUCTURED_RUNTIME_STATE_ADDENDUM,
     MULTIMODAL_CONTEXT_ADDENDUM,
@@ -29,9 +30,10 @@ from inference.agent.vision_context import (
     current_grid_image_part,
 )
 
+from inference.agent.programmatic_memory import ProgrammaticMemory, resolve_programmatic_log_path
 from inference.agent.python_tool_sandbox import run_sandboxed_python
 from inference.agent.runtime_state import Frame, HistoryEntry, RUNTIME_STATE_FILENAME, load_runtime_state
-from inference.utils.openai_compat import build_chat_payload, build_headers
+from inference.utils.openai_compat import build_chat_payload, build_headers, normalize_provider
 
 log = logging.getLogger(__name__)
 
@@ -150,15 +152,18 @@ _REQUEST_SAFETY_MARGIN_TOKENS = 512
 _CONTEXT_OVERFLOW_RETRY_TRIM_TOKENS = 512
 _PERSISTENT_HISTORY_ASSISTANT_TURNS = 30
 _RESPONSE_META_MAX_CHARS = 4000
+_LOCAL_ANALYZER_PROLONG_MEMORY = _get_env_bool("LOCAL_ANALYZER_PROLONG_MEMORY", True)
 
 _PYTHON_TOOL_DESCRIPTION = (
     "Run one ephemeral Python snippet against preloaded ASCII game state. Available globals: "
     "`current_frame`, `previous_frame`, `history`, `transitions`, `last_transition`, "
     "`valid_actions`, `last_action_result`, "
+    "`game_log_path` / `grep_log` / `tail_log` / `read_log` / `list_log_actions` for PRO-LONG programmatic memory, "
     "and `action(actions)` for executing one or more real environment actions. "
     "`current_frame` and each `history[*].frame` expose only `.ascii`, `.segmentation`, `.step`, and `.level`; "
     "`history[-1].frame` is the current post-action frame, not the previous frame. "
     "For before/after diffs, compare `previous_frame` to `current_frame` or use `last_transition.before_frame` and `.after_frame`. "
+    "For long-horizon history, search `logs.txt` with `grep_log` / `tail_log` instead of relying on chat context. "
     "For MOUSE, pass `row` and `col` integer fields; legacy x/y fields are rejected. "
     "The raw numeric grid is not available. Use `.segmentation` as the primary view; use `.ascii` only to read a small, specific region. "
     "Use `print(...)` for compact output or assign final data to `result`."
@@ -347,10 +352,12 @@ def _format_model_response_meta(
     return "\n".join(lines)
 
 
-def _build_system_prompt(*, tool_output_tokens: int) -> str:
+def _build_system_prompt(*, tool_output_tokens: int, prolong_memory: bool = True) -> str:
     prompt = "You are a coding agent solving a grid-based puzzle game."
     prompt += GAME_OVERVIEW_ADDENDUM
     prompt += STRUCTURED_RUNTIME_STATE_ADDENDUM
+    if prolong_memory:
+        prompt += PROLONG_MEMORY_ADDENDUM
     if current_grid_image_enabled():
         prompt += MULTIMODAL_CONTEXT_ADDENDUM
     prompt += VISUAL_GAME_ADDENDUM
@@ -894,6 +901,63 @@ def _is_context_length_error(exc: BaseException) -> bool:
     )
 
 
+def _is_image_limit_error(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return "image(s) may be provided" in message or "at most 4 image" in message
+
+
+def _message_image_parts(message: dict[str, Any]) -> list[dict[str, Any]]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    return [
+        part
+        for part in content
+        if isinstance(part, dict) and str(part.get("type", "")).strip() == "image_url"
+    ]
+
+
+def _strip_images_from_message(message: dict[str, Any]) -> dict[str, Any]:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return message
+    stripped = [
+        part
+        for part in content
+        if not (isinstance(part, dict) and str(part.get("type", "")).strip() == "image_url")
+    ]
+    if not stripped:
+        stripped = [{"type": "text", "text": "(prior grid image omitted for provider image limit)"}]
+    return {**message, "content": stripped}
+
+
+def _count_message_images(messages: list[dict[str, Any]]) -> int:
+    return sum(len(_message_image_parts(message)) for message in messages)
+
+
+def _cap_message_images(messages: list[dict[str, Any]], max_images: int) -> list[dict[str, Any]]:
+    if max_images <= 0:
+        return messages
+    result = list(messages)
+    while _count_message_images(result) > max_images:
+        stripped_any = False
+        for index in range(1, len(result)):
+            if _message_image_parts(result[index]):
+                result[index] = _strip_images_from_message(result[index])
+                stripped_any = True
+                break
+        if not stripped_any:
+            break
+    return result
+
+
+def _provider_max_images(provider: str) -> int | None:
+    normalized = normalize_provider(provider)
+    if normalized == "deepinfra":
+        return 4
+    return None
+
+
 @dataclass
 class _ChatCompletionResult:
     message: dict[str, Any]
@@ -938,8 +1002,10 @@ class ToolAgent:
         self._tool_output_tokens = max(64, _LOCAL_ANALYZER_TOOL_OUTPUT_TOKENS)
         self._tool_output_chars = max(256, self._tool_output_tokens * 4)
         self._save_request_logs = bool(save_request_logs)
+        self._prolong_memory_enabled = bool(_LOCAL_ANALYZER_PROLONG_MEMORY)
         self._system_prompt = _build_system_prompt(
             tool_output_tokens=self._tool_output_tokens,
+            prolong_memory=self._prolong_memory_enabled,
         )
         self._request_safety_margin_tokens = _REQUEST_SAFETY_MARGIN_TOKENS
         self._context_budget_tokens = max(
@@ -955,14 +1021,19 @@ class ToolAgent:
         self._last_step_summary: dict[str, Any] | None = None
         self._last_action_result: dict[str, Any] | None = None
         self._summarized_knowledge = _empty_world_model()
+        self._programmatic_memory: ProgrammaticMemory | None = None
+        self._active_state_path: Path | None = None
+        self._active_action_num: int = 0
+        self._active_level: int = 1
+        self._active_score: int = 0
 
     def _headers(self) -> dict[str, str]:
         api_key = (
             self._api_key
             or os.environ.get("LOCAL_ANALYZER_API_KEY", "").strip()
             or os.environ.get("CEREBRAS_API_KEY", "").strip()
-            or os.environ.get("OPENROUTER_API_KEY", "").strip()
             or os.environ.get("DEEPINFRA_API_KEY", "").strip()
+            or os.environ.get("OPENROUTER_API_KEY", "").strip()
             or os.environ.get("OPENAI_API_KEY", "").strip()
         )
         site_url = os.environ.get("LOCAL_ANALYZER_SITE_URL", "").strip()
@@ -976,14 +1047,88 @@ class ToolAgent:
 
     def _ensure_session(self, state_path: Path) -> None:
         runtime_dir = state_path.parent
-        if self._session_runtime_dir != runtime_dir:
-            self._session_runtime_dir = runtime_dir
+        state_changed = self._active_state_path != state_path
+        if self._session_runtime_dir != runtime_dir or state_changed:
             self._history_messages = []
             self._session_total_tokens = 0
             self._session_generated_tokens = 0
             self._last_step_summary = None
             self._last_action_result = None
             self._summarized_knowledge = _empty_world_model()
+            self._programmatic_memory = None
+            self._active_action_num = 0
+            self._active_level = 1
+            self._active_score = 0
+            self._session_runtime_dir = runtime_dir
+        self._active_state_path = state_path
+        if self._prolong_memory_enabled:
+            log_path = resolve_programmatic_log_path(state_path)
+            if self._programmatic_memory is None or self._programmatic_memory.path != log_path:
+                self._programmatic_memory = ProgrammaticMemory(path=log_path)
+
+    def _memory(self) -> ProgrammaticMemory | None:
+        if not self._prolong_memory_enabled:
+            return None
+        if self._programmatic_memory is None and self._active_state_path is not None:
+            self._programmatic_memory = ProgrammaticMemory.for_state_path(self._active_state_path)
+        return self._programmatic_memory
+
+    def bind_runtime_state(self, state_path: Path) -> None:
+        """Attach this analyzer to a per-game runtime/log path before play starts."""
+        self._ensure_session(state_path)
+
+    def record_environment_action(
+        self,
+        *,
+        action_num: int,
+        action_display: str,
+        frame: Frame | None,
+        score: int,
+        level: int,
+        board_changed: bool | None = None,
+        state: str | None = None,
+        state_path: Path | None = None,
+    ) -> None:
+        """Append one environment transition into the lossless programmatic log."""
+        if state_path is not None:
+            self._ensure_session(state_path)
+        memory = self._memory()
+        if memory is None:
+            return
+        plan = self._summarized_knowledge.get("current_plan", "")
+        memory.append_action(
+            action_num=action_num,
+            action_display=action_display,
+            frame=frame,
+            score=score,
+            level=level,
+            board_changed=board_changed,
+            state=state,
+            plan=plan,
+        )
+        self._active_action_num = max(0, int(action_num))
+        self._active_level = max(1, int(level))
+        self._active_score = max(0, int(score))
+
+    def seed_programmatic_memory(
+        self,
+        *,
+        frame: Frame | None,
+        score: int = 0,
+        level: int | None = None,
+        state_path: Path | None = None,
+    ) -> None:
+        if state_path is not None:
+            self._ensure_session(state_path)
+        memory = self._memory()
+        if memory is None:
+            return
+        memory.write_initial_state(frame=frame, score=score, level=level)
+
+    def mark_game_over_reset(self) -> None:
+        memory = self._memory()
+        if memory is not None:
+            memory.mark_game_over_reset()
 
     @property
     def total_tokens(self) -> int:
@@ -1104,13 +1249,23 @@ class ToolAgent:
             pieces.append(f"stop_reason={stop_reason}.")
         return " ".join(pieces)
 
-    def _update_summarized_knowledge_from_assistant(self, content: str) -> None:
+    def _update_summarized_knowledge_from_assistant(self, content: str, *, reasoning: str = "") -> None:
         note = _extract_scientist_note(content)
-        if not note:
+        if note:
+            for key, value in note.items():
+                if value:
+                    self._summarized_knowledge[key] = value
+        memory = self._memory()
+        if memory is None:
             return
-        for key, value in note.items():
-            if value:
-                self._summarized_knowledge[key] = value
+        memory.note_analysis(
+            content=content,
+            reasoning=reasoning,
+            world_model=dict(self._summarized_knowledge),
+        )
+        plan = self._summarized_knowledge.get("current_plan", "")
+        if plan:
+            memory.note_plan(plan)
 
     def _update_summarized_knowledge_from_step_summary(self) -> None:
         summary = self._last_step_summary
@@ -1222,15 +1377,30 @@ class ToolAgent:
             [
                 state_line,
                 f"Valid actions right now: {_format_valid_action_line(valid_actions)}.",
-                "Only tool: `python`. It receives `current_frame`, `previous_frame`, `history`, `transitions`, `last_transition`, `valid_actions`, `last_action_result`, and `action(actions)`.",
+                "Only tool: `python`. It receives `current_frame`, `previous_frame`, `history`, `transitions`, `last_transition`, `valid_actions`, `last_action_result`, `action(actions)`, and programmatic log helpers over `logs.txt`.",
                 "Only letter-coded board views and lightweight metadata are exposed; raw numeric color IDs are not available.",
                 "Keep tool output compact: use `current_frame.segmentation` as the primary view, and `current_frame.ascii` only for a small specific region; never print full boards.",
                 "For the most recent change, compare `previous_frame` to `current_frame`, or `last_transition.before_frame` to `last_transition.after_frame`; `history[-1].frame` is the current frame, not the previous one.",
+                "For older trajectory details, score transitions, or compacted reasoning, search `logs.txt` with `grep_log` / `tail_log` / `list_log_actions` rather than trusting chat history alone.",
                 "Use Python to inspect the evidence, refine that world model from the newest history, and search or score candidate actions or short sequences against the current goal as you currently understand it.",
                 "Maintain a compact working world model of what the current level seems to contain, what actions appear to do, what the goal seems to be, what is still uncertain, and what plan currently looks best.",
                 "Below you are provided with the current world model from the previous turn. The default behavior is to copy it and add or remove things based on the evidence that you gathered. BEFORE EXECUTING NEW ACTIONS YOU MUST ALWAYS GIVE THE REVISED VERSION OF THE WORLD MODEL.",
             ]
         )
+        memory = self._memory()
+        if memory is not None:
+            stats = memory.stats()
+            if stats.get("exists"):
+                lines.append(
+                    f"Programmatic memory ready at logs.txt ({stats.get('lines', 0)} lines, "
+                    f"{stats.get('actions_logged', 0)} actions logged). "
+                    "Start long-horizon checks with list_log_actions() or tail_log(80)."
+                )
+            else:
+                lines.append(
+                    "Programmatic memory file logs.txt will be populated as actions execute; "
+                    "use grep_log/tail_log once it has entries."
+                )
         lines.append(
             "You may call `action(actions)` more than once in one Python snippet if your search or control loop needs it, "
             "but stop immediately if a result reports `game_over`, `run_complete`, `level_completed`, or `done`."
@@ -1288,10 +1458,14 @@ class ToolAgent:
         tools: list[dict[str, Any]] | None,
         request_timeout_seconds: float | None = None,
     ) -> _ChatCompletionResult:
+        request_messages = messages
+        max_images = _provider_max_images(self._model.provider)
+        if max_images is not None:
+            request_messages = _cap_message_images(messages, max_images)
         payload = build_chat_payload(
             provider=self._model.provider,
             model=self._model.model_id,
-            messages=messages,
+            messages=request_messages,
             max_tokens=self._max_output_tokens,
             temperature=_LOCAL_ANALYZER_TEMPERATURE,
             top_p=_LOCAL_ANALYZER_TOP_P,
@@ -1546,11 +1720,13 @@ class ToolAgent:
                 ),
             }
 
+        memory = self._memory()
         sandbox_result = run_sandboxed_python(
             code=code,
             timeout_seconds=self._python_timeout,
             initial_state=_serialized_runtime_state(),
             action_handler=_handle_action,
+            game_log_path=memory.path if memory is not None else None,
         )
 
         action_results = [
@@ -1607,21 +1783,57 @@ class ToolAgent:
             payload["tool_choice"] = _request_tool_choice(tools)
         return _estimate_tokens(payload)
 
-    def _drop_oldest_history_block(self, history: list[dict[str, Any]], *, preserve_recent: int) -> bool:
+    def _drop_oldest_history_block(
+        self,
+        history: list[dict[str, Any]],
+        *,
+        preserve_recent: int,
+    ) -> list[dict[str, Any]]:
         removable = len(history) - preserve_recent
         if removable <= 0:
-            return False
-        first = history.pop(0)
-        first_role = str(first.get("role", "")).strip()
+            return []
+        dropped: list[dict[str, Any]] = [history.pop(0)]
+        first_role = str(dropped[0].get("role", "")).strip()
         if first_role in {"assistant", "tool"}:
             while history and history[0].get("role") == "tool" and len(history) > preserve_recent:
-                history.pop(0)
-            return True
+                dropped.append(history.pop(0))
+            return dropped
         while history and history[0].get("role") == "tool" and len(history) > preserve_recent:
-            history.pop(0)
+            dropped.append(history.pop(0))
         while history and history[0].get("role") != "user" and len(history) > preserve_recent:
-            history.pop(0)
-        return True
+            dropped.append(history.pop(0))
+        return dropped
+
+    def _compact_dropped_history(self, dropped: list[dict[str, Any]]) -> None:
+        if not dropped:
+            return
+        memory = self._memory()
+        if memory is None:
+            return
+        world_bits = [
+            f"{label}: {value}"
+            for label, value in (
+                ("World model", self._summarized_knowledge.get("world_model", "")),
+                ("Goal model", self._summarized_knowledge.get("goal_model", "")),
+                ("Action model", self._summarized_knowledge.get("action_model", "")),
+                ("Plan", self._summarized_knowledge.get("current_plan", "")),
+                ("Recent findings", self._summarized_knowledge.get("recent_findings", "")),
+            )
+            if value
+        ]
+        digest = (
+            "Chat context compacted to stay inside the token budget. "
+            "Recover long-horizon details from logs.txt with grep_log/tail_log."
+        )
+        if world_bits:
+            digest += "\nCarried working model at compaction time:\n" + "\n".join(world_bits)
+        memory.append_reasoning_compaction(
+            action_num=max(0, self._active_action_num),
+            level=max(1, self._active_level),
+            score=max(0, self._active_score),
+            dropped_messages=dropped,
+            digest=digest,
+        )
 
     def _keep_recent_history_turns(
         self,
@@ -1669,7 +1881,18 @@ class ToolAgent:
             previous_message = trimmed_history[len(trimmed_history) - len(history) - 1]
             if str(previous_message.get("role", "")).strip() == "user":
                 history = [previous_message, *history]
-        return self._drop_until_first_user_message(history)
+        history = self._drop_until_first_user_message(history)
+        if history:
+            first_kept_id = id(history[0])
+            drop_until = next(
+                (index for index, message in enumerate(trimmed_history) if id(message) == first_kept_id),
+                len(trimmed_history),
+            )
+        else:
+            drop_until = len(trimmed_history)
+        if drop_until > 0:
+            self._compact_dropped_history(trimmed_history[:drop_until])
+        return history
 
     def _trim_messages_for_context(
         self,
@@ -1686,8 +1909,10 @@ class ToolAgent:
         preserve_recent = max(0, preserve_recent)
         budget_tokens = max(1, self._context_budget_tokens - max(0, extra_safety_tokens))
         while history and self._estimate_request_input_tokens([system_message, *history], tools=tools) > budget_tokens:
-            if not self._drop_oldest_history_block(history, preserve_recent=preserve_recent):
+            dropped = self._drop_oldest_history_block(history, preserve_recent=preserve_recent)
+            if not dropped:
                 break
+            self._compact_dropped_history(dropped)
         history = self._drop_until_first_user_message(history)
         return [system_message, *history]
 
@@ -1701,8 +1926,10 @@ class ToolAgent:
             return []
         system_message = messages[0]
         history = list(messages[1:])
-        if not self._drop_oldest_history_block(history, preserve_recent=max(0, preserve_recent)):
+        dropped = self._drop_oldest_history_block(history, preserve_recent=max(0, preserve_recent))
+        if not dropped:
             return list(messages)
+        self._compact_dropped_history(dropped)
         return [system_message, *history]
 
     def analyze(
@@ -1722,10 +1949,19 @@ class ToolAgent:
         self._ensure_session(state_path)
         self._step_env_callback = step_env
         self._current_valid_actions = _normalize_valid_actions(valid_actions)
+        self._active_action_num = max(0, int(action_num))
 
         analyzer_log = transcript_path or (state_path.parent / f"{state_path.stem}_analyzer.txt")
         prompt_log = _resolve_prompt_log_path(state_path)
         current_frame, history_entries = load_runtime_state(state_path)
+        if current_frame is not None:
+            self._active_level = max(1, int(current_frame.level))
+        if self._prolong_memory_enabled:
+            self.seed_programmatic_memory(
+                frame=current_frame,
+                score=self._active_score,
+                level=self._active_level,
+            )
         user_prompt = self._build_user_prompt(
             action_num,
             valid_actions=valid_actions,
@@ -1836,6 +2072,16 @@ class ToolAgent:
                             finish_reason=result.finish_reason,
                         )
                 except requests.RequestException as exc:
+                    if _is_image_limit_error(exc):
+                        max_images = _provider_max_images(self._model.provider) or 4
+                        trimmed_messages = _cap_message_images(messages, max_images)
+                        if trimmed_messages != messages:
+                            append_transcript(
+                                "ANALYZER STATUS",
+                                "image_limit_recovered: dropped older grid images after provider rejected the request.",
+                            )
+                            messages = trimmed_messages
+                            continue
                     if not _is_context_length_error(exc):
                         raise
                     trimmed_messages = self._trim_messages_for_context(
@@ -1895,10 +2141,11 @@ class ToolAgent:
 
                 if not tool_calls:
                     if content:
-                        self._update_summarized_knowledge_from_assistant(content)
+                        self._update_summarized_knowledge_from_assistant(content, reasoning=reasoning)
                         append_transcript("ASSISTANT", content)
                         assistant_message["content"] = content
                     elif reasoning:
+                        self._update_summarized_knowledge_from_assistant("", reasoning=reasoning)
                         assistant_message["content"] = None
 
                     if content or reasoning:
@@ -1928,8 +2175,9 @@ class ToolAgent:
                     messages.append({"role": "user", "content": followup_prompt})
                     continue
 
+                if content or reasoning:
+                    self._update_summarized_knowledge_from_assistant(content, reasoning=reasoning)
                 if content:
-                    self._update_summarized_knowledge_from_assistant(content)
                     append_transcript("ASSISTANT", content)
                     assistant_message["content"] = content
                 assistant_message["tool_calls"] = tool_calls
@@ -2040,10 +2288,19 @@ class ToolAgent:
             f"yield_seconds: {self._yield_seconds if self._yield_seconds is not None else 'disabled'}\n"
             f"available_tools: python\n"
             f"python_timeout_seconds: {self._python_timeout}\n"
+            f"prolong_memory: {'enabled' if self._prolong_memory_enabled else 'disabled'}\n"
             f"history_messages: {len(self._history_messages)}\n"
             f"step_executed: {step_executed}\n"
             f"message: {status_message}"
         )
+        memory = self._memory()
+        if memory is not None:
+            stats = memory.stats()
+            status += (
+                f"\nprogrammatic_log: {stats.get('path')}\n"
+                f"programmatic_log_lines: {stats.get('lines', 0)}\n"
+                f"programmatic_log_actions: {stats.get('actions_logged', 0)}"
+            )
         append_transcript("ANALYZER STATUS", status)
         if latest_request_messages is not None:
             _write_prompt_log_snapshot(

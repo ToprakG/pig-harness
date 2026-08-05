@@ -112,3 +112,21 @@ COMPACT_TOOL_SESSION_ADDENDUM = (
     "- Tool responses are capped to about {tool_output_tokens} tokens. If a response is cut off, the tool result will tell you that.\n"
     "- Keep code snippets short and purpose-built rather than dumping large frameworks into one call.\n"
 )
+
+PROLONG_MEMORY_ADDENDUM = (
+    "\n\nProgrammatic memory (PRO-LONG):\n"
+    "- `logs.txt` is the lossless append-only game log. The harness writes every action header, plan, outcome, board state, and compacted reasoning into it.\n"
+    "- Active chat context is intentionally compact and may drop older turns. Treat `logs.txt` as the source of truth for long-horizon history, not the chat transcript.\n"
+    "- Parse the log **programmatically** with Python helpers instead of pasting full 64x64 boards into reasoning.\n"
+    "- Log markers:\n"
+    "  [INITIAL BOARD STATE] — grid at Action 0\n"
+    "  [POST-ACTION BOARD STATE] — settled grid after each action\n"
+    "  [PLAN] — your recent action plan\n"
+    "  [ANALYSIS] — world-model / analysis notes captured from earlier turns\n"
+    "  [REASONING COMPACTION] — preserved excerpts when older chat context was compacted away\n"
+    "- Helpers available inside every `python` call:\n"
+    "  `game_log_path` (usually `'logs.txt'`), `grep_log(pattern, ignore_case=False, context_before=0, context_after=0, max_matches=50)`,\n"
+    "  `tail_log(n=80)`, `read_log(start_line=None, end_line=None)`, `list_log_actions()`, and read-only `open('logs.txt')`.\n"
+    "- Strong defaults: `list_log_actions()` for the trajectory outline; `grep_log(r'Score:\\\\s*\\\\d+')` or `grep_log('board_changed=True')` for consequential moments; `tail_log(120)` for the recent window; regex/Python over selected sections for hypotheses and world-model checks.\n"
+    "- When chat context feels incomplete, search the log before re-deriving the game from scratch. Score increases, resets, and long-range dependencies are often only recoverable from the log.\n"
+)

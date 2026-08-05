@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -101,6 +102,57 @@ def _load_optional_json(path: Path) -> dict[str, Any]:
 
 def _load_run_config(run_dir: Path) -> dict[str, Any]:
     return _load_optional_json(run_dir / RUN_CONFIG_FILENAME)
+
+
+def _expand_username(value: str) -> str:
+    username = (
+        os.environ.get("USER", "").strip()
+        or os.environ.get("USERNAME", "").strip()
+        or "unknown"
+    )
+    for placeholder in ("{username}", "{user}", "<username>", "$USER", "${USER}"):
+        value = value.replace(placeholder, username)
+    return value
+
+
+def _normalize_eval_provider(value: str | None) -> str:
+    provider = str(value or "local").strip().lower()
+    if provider in {"", "default", "local", "vllm"}:
+        return "local"
+    if provider in {"openrouter", "router"}:
+        return "openrouter"
+    if provider in {"deepinfra", "deep-infra"}:
+        return "deepinfra"
+    return provider
+
+
+def _resolve_provider_profile(config: dict[str, Any], provider: str) -> dict[str, Any]:
+    providers = config.get("providers")
+    if not isinstance(providers, dict):
+        return {}
+    profile = providers.get(provider)
+    if not isinstance(profile, dict):
+        known = ", ".join(sorted(str(key) for key in providers))
+        raise ValueError(
+            f"Unknown eval provider {provider!r}. Configure it under providers "
+            f"({known or 'no providers configured'})."
+        )
+    return profile
+
+
+def _resolve_runs_dir(config: dict[str, Any], provider: str | None = None) -> Path:
+    selected = _normalize_eval_provider(provider or config.get("provider"))
+    providers = config.get("providers")
+    if isinstance(providers, dict) and providers:
+        profile = _resolve_provider_profile(config, selected)
+        runs_dir = profile.get("runs_dir")
+        if not runs_dir:
+            raise ValueError(f"Eval provider {selected!r} is missing runs_dir.")
+        return Path(_expand_username(str(runs_dir)))
+    raw_runs_dir = config.get("runs_dir")
+    if raw_runs_dir:
+        return Path(_expand_username(str(raw_runs_dir)))
+    return Path("runs")
 
 
 def _normalize_run_names(raw_runs: Any) -> list[str]:
@@ -771,6 +823,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("run_dirs", nargs="*", help="Optional run directory or directories to evaluate directly.")
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help=f"Path to eval JSON config (default: {DEFAULT_CONFIG_PATH}).")
     parser.add_argument(
+        "--provider",
+        default="",
+        help="Eval provider profile from config providers (e.g. local, openrouter, deepinfra).",
+    )
+    parser.add_argument(
         "--score-output",
         default="",
         help="Optional path for the lightweight aggregate score JSON.",
@@ -786,7 +843,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.run_dirs:
         run_dirs = [Path(run_dir) for run_dir in args.run_dirs]
     else:
-        runs_dir = Path(str(config.get("runs_dir") or "runs"))
+        provider = str(args.provider or "").strip() or None
+        runs_dir = _resolve_runs_dir(config, provider=provider)
         run_names = _normalize_run_names(config.get("runs"))
         if not run_names:
             run_names = _discover_run_names(runs_dir)

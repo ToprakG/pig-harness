@@ -12,6 +12,7 @@ import tempfile
 import threading
 import textwrap
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from inference.utils import segmentation as _segmentation
@@ -25,6 +26,7 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
     import io
     import json
     import os
+    import re
     import sys
     import traceback
 
@@ -108,7 +110,11 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
         "type",
         "ValueError",
         "RuntimeError",
+        "PermissionError",
+        "OSError",
+        "FileNotFoundError",
         "zip",
+        "open",
     }
 
 
@@ -122,6 +128,140 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
         if not line:
             raise EOFError("sandbox input closed")
         return json.loads(line)
+
+
+    def _configure_programmatic_memory(game_log_path):
+        # Expose PRO-LONG-style read access to the append-only game log.
+        allowed = set()
+        log_path = str(game_log_path or "").strip()
+        if log_path:
+            real = os.path.realpath(log_path)
+            allowed.add(real)
+            if not os.path.exists("logs.txt"):
+                try:
+                    os.symlink(real, "logs.txt")
+                except OSError:
+                    try:
+                        with open(real, "rb") as src, open("logs.txt", "wb") as dst:
+                            dst.write(src.read())
+                    except OSError:
+                        pass
+            if os.path.exists("logs.txt"):
+                allowed.add(os.path.realpath("logs.txt"))
+
+        def _resolve_allowed(path):
+            candidate = os.path.realpath(str(path))
+            if candidate in allowed:
+                return candidate
+            base = os.path.basename(candidate)
+            if base == "logs.txt" and allowed:
+                return next(iter(allowed))
+            raise PermissionError(
+                "Only read access to logs.txt (programmatic game memory) is allowed."
+            )
+
+        def _safe_open(file, mode="r", *args, **kwargs):
+            mode_text = str(mode or "r")
+            if any(flag in mode_text for flag in ("w", "a", "x", "+")):
+                raise PermissionError("Write access is not allowed in the sandbox.")
+            resolved = _resolve_allowed(file)
+            return builtins.open(resolved, mode_text, *args, **kwargs)
+
+        def read_log(start_line=None, end_line=None, max_chars=120000):
+            if not allowed:
+                return "(game log unavailable)"
+            path = next(iter(allowed))
+            with builtins.open(path, "r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+            start = 1 if start_line is None else max(1, int(start_line))
+            end = len(lines) if end_line is None else max(start, int(end_line))
+            selected = lines[start - 1 : end]
+            text = "\n".join(f"{start + offset}:{line}" for offset, line in enumerate(selected))
+            if max_chars and len(text) > int(max_chars):
+                omitted = len(text) - int(max_chars)
+                return text[: int(max_chars)] + f"\n... [truncated {omitted} chars]"
+            return text
+
+        def tail_log(n=80, max_chars=120000):
+            if not allowed:
+                return "(game log unavailable)"
+            path = next(iter(allowed))
+            with builtins.open(path, "r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+            count = max(0, int(n))
+            clipped = lines[-count:] if count else []
+            start = max(1, len(lines) - len(clipped) + 1)
+            text = "\n".join(f"{start + offset}:{line}" for offset, line in enumerate(clipped))
+            if max_chars and len(text) > int(max_chars):
+                omitted = len(text) - int(max_chars)
+                return text[: int(max_chars)] + f"\n... [truncated {omitted} chars]"
+            return text
+
+        def grep_log(
+            pattern,
+            *,
+            ignore_case=False,
+            context_before=0,
+            context_after=0,
+            max_matches=50,
+            max_chars=120000,
+        ):
+            if not allowed:
+                return "(game log unavailable)"
+            path = next(iter(allowed))
+            flags = re.MULTILINE
+            if ignore_case:
+                flags |= re.IGNORECASE
+            try:
+                regex = re.compile(str(pattern), flags)
+            except re.error as exc:
+                return f"Invalid regex: {exc}"
+            with builtins.open(path, "r", encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+            hits = []
+            match_count = 0
+            before = max(0, int(context_before))
+            after = max(0, int(context_after))
+            limit = max(1, int(max_matches))
+            for index, line in enumerate(lines):
+                if not regex.search(line):
+                    continue
+                match_count += 1
+                start = max(0, index - before)
+                end = min(len(lines), index + 1 + after)
+                if before or after:
+                    hits.append(f"-- match {match_count} @ line {index + 1} --")
+                for line_no in range(start, end):
+                    hits.append(f"{line_no + 1}:{lines[line_no]}")
+                if match_count >= limit:
+                    hits.append(f"... truncated after {limit} matches")
+                    break
+            if not hits:
+                return "(no matches)"
+            text = "\n".join(hits)
+            if max_chars and len(text) > int(max_chars):
+                omitted = len(text) - int(max_chars)
+                return text[: int(max_chars)] + f"\n... [truncated {omitted} chars]"
+            return text
+
+        def list_log_actions(max_entries=500):
+            if not allowed:
+                return []
+            path = next(iter(allowed))
+            header_re = re.compile(r"^Action\s+\d+\s*\|", re.IGNORECASE)
+            with builtins.open(path, "r", encoding="utf-8", errors="replace") as handle:
+                headers = [line.rstrip("\n") for line in handle if header_re.match(line.strip())]
+            limit = max(1, int(max_entries))
+            return headers[-limit:]
+
+        return {
+            "open": _safe_open,
+            "read_log": read_log,
+            "tail_log": tail_log,
+            "grep_log": grep_log,
+            "list_log_actions": list_log_actions,
+            "game_log_path": "logs.txt" if allowed else None,
+        }
 
 
     class FrameView:
@@ -323,10 +463,15 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             "__builtins__": {
                 name: getattr(builtins, name)
                 for name in SAFE_BUILTINS
+                if name != "open"
             },
             "result": None,
         }
         runtime_globals["__builtins__"]["__import__"] = _safe_import
+        memory_helpers = _configure_programmatic_memory(initial.get("game_log_path"))
+        runtime_globals["__builtins__"]["open"] = memory_helpers["open"]
+        for helper_name in ("read_log", "tail_log", "grep_log", "list_log_actions", "game_log_path"):
+            runtime_globals[helper_name] = memory_helpers[helper_name]
 
         def _refresh_state(state_payload):
             current_frame = _frame_from_payload(state_payload.get("current_frame"))
@@ -451,6 +596,7 @@ def run_sandboxed_python(
     timeout_seconds: int,
     initial_state: dict[str, Any],
     action_handler: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    game_log_path: str | Path | None = None,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="rgb_python_tool_") as sandbox_dir:
         host_action_results: list[dict[str, Any]] = []
@@ -485,6 +631,12 @@ def run_sandboxed_python(
 
         threading.Thread(target=_stdout_reader, daemon=True).start()
 
+        resolved_log_path = ""
+        if game_log_path is not None:
+            candidate = Path(game_log_path)
+            if candidate.exists():
+                resolved_log_path = str(candidate.resolve())
+
         _send_json_line(
             process.stdin,
             {
@@ -493,6 +645,7 @@ def run_sandboxed_python(
                 "sandbox_cwd": sandbox_dir,
                 "state": initial_state,
                 "color_chars": ARC_COLOR_CHARS,
+                "game_log_path": resolved_log_path,
             },
         )
 

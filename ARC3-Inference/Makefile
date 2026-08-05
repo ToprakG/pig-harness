@@ -45,6 +45,7 @@ DATASET ?= $(shell $(CONFIG_VALUE) environment.dataset)
 GAME_TAGS ?= $(shell $(CONFIG_VALUE) environment.include_tags)
 EXCLUDE_GAME_TAGS ?= $(shell $(CONFIG_VALUE) environment.exclude_tags)
 ENVIRONMENTS_DIR ?= $(shell $(CONFIG_VALUE) environment.environments_dir)
+ONLINE ?= $(shell $(CONFIG_VALUE) environment.online)
 MAX_ACTIONS ?= $(shell $(CONFIG_VALUE) environment.max_steps)
 MAX_RUNTIME_MINUTES ?= $(shell $(CONFIG_VALUE) environment.max_runtime_minutes)
 MAX_EXPERIMENT_RUNTIME_HOURS ?= $(shell $(CONFIG_VALUE) environment.max_experiment_runtime_hours)
@@ -196,6 +197,7 @@ CHAT_SYSTEM ?=
 PROMPT ?=
 
 EVAL_CONFIG_PATH ?= configs/eval.json
+EVAL_PROVIDER ?=
 SCORE_OUTPUT_PATH ?=
 SCORE_RUN_DIR ?=
 SIGNIFICANCE_CONFIG_PATH ?= configs/significance.json
@@ -500,7 +502,7 @@ _taaf-run:
 				exit 1; \
 			fi; \
 			;; \
-		deepinfra) \
+		deepinfra|deep-infra) \
 			if [ -z "$$local_analyzer_api_key" ]; then \
 				local_analyzer_api_key="$${DEEPINFRA_API_KEY:-$${OPENAI_API_KEY:-}}"; \
 			fi; \
@@ -521,6 +523,7 @@ _taaf-run:
 		$(if $(filter-out [],$(strip $(GAME_TAGS))),--include-tags '$(GAME_TAGS)',) \
 		$(if $(filter-out [],$(strip $(EXCLUDE_GAME_TAGS))),--exclude-tags '$(EXCLUDE_GAME_TAGS)',) \
 		$(if $(strip $(ENVIRONMENTS_DIR)),--environments-dir '$(ENVIRONMENTS_DIR)',) \
+		$(if $(filter true TRUE 1 yes YES on ON,$(ONLINE)),--online,) \
 		$(if $(RUN_NAME),--run-name '$(RUN_NAME)',) \
 		$(if $(strip $(EXPERIMENTS_DIR)),--experiments-dir '$(EXPERIMENTS_DIR)',) \
 		$(if $(strip $(EXPERIMENT_DIR)),--experiment-dir '$(EXPERIMENT_DIR)',) \
@@ -593,7 +596,7 @@ chat:
 		$(if $(PROMPT),--prompt "$(PROMPT)")
 
 eval:
-	$(UV_RUN) inference-eval --config "$(EVAL_CONFIG_PATH)" $(if $(SCORE_OUTPUT_PATH),--score-output "$(SCORE_OUTPUT_PATH)")
+	$(UV_RUN) inference-eval --config "$(EVAL_CONFIG_PATH)" $(if $(EVAL_PROVIDER),--provider "$(EVAL_PROVIDER)",) $(if $(SCORE_OUTPUT_PATH),--score-output "$(SCORE_OUTPUT_PATH)")
 
 score_run:
 	@if [ -z "$(strip $(SCORE_RUN_DIR))" ]; then \

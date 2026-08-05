@@ -267,8 +267,19 @@ class _HarnessGameSession:
         self.transcript_path.parent.mkdir(parents=True, exist_ok=True)
         self.transcript_path.touch(exist_ok=True)
         self.token_baseline = _analyzer_reported_tokens(self.analyzer)
+        bind_runtime = getattr(self.analyzer, "bind_runtime_state", None)
+        if callable(bind_runtime):
+            bind_runtime(self.state_path)
         self.seed_initial_history()
         self.write_runtime_state()
+        seed_memory = getattr(self.analyzer, "seed_programmatic_memory", None)
+        if callable(seed_memory):
+            seed_memory(
+                frame=self.current_frame(),
+                score=int(self.game.current_state.levels_completed),
+                level=_level_number(self.game),
+                state_path=self.state_path,
+            )
         self._append_initial_viewer_event()
         self.write_viewer_payload()
         try:
@@ -661,6 +672,9 @@ class _HarnessGameSession:
         return final_payload
 
     def _execute_auto_reset(self) -> None:
+        mark_reset = getattr(self.analyzer, "mark_game_over_reset", None)
+        if callable(mark_reset):
+            mark_reset()
         action = arcengine.ActionInput(id=arcengine.GameAction.RESET, data={})
         self._execute_action(action, batch_index=1, batch_size=1, generated_tokens=0)
 
@@ -728,6 +742,18 @@ class _HarnessGameSession:
             "batch_size": batch_size,
             **self.timing_payload(),
         }
+        record_memory = getattr(self.analyzer, "record_environment_action", None)
+        if callable(record_memory):
+            record_memory(
+                action_num=int(payload["action_num"]),
+                action_display=action_display,
+                frame=current_frame,
+                score=completed,
+                level=int(payload["level"]),
+                board_changed=board_changed,
+                state=raw_state.name,
+                state_path=self.state_path,
+            )
         self._append_action_viewer_event(payload, current_frame)
         if flush_viewer_payload:
             self.write_viewer_payload()

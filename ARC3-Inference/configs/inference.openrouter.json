@@ -1,15 +1,16 @@
 {
   "shared": {
-    "model_name": "Qwen/Qwen3.6-27B",
+    "model_name": "google/gemma-4-31b-it",
     "base_url": "https://openrouter.ai/api/v1",
     "provider": "openrouter",
     "context_window": 65536
   },
   "experiments": {
-    "root_dir": "/shared/arc_3_results/{username}"
+    "root_dir": "/Users/toprakgundogdu/duck-harness/openrouter-runs/{username}"
   },
   "environment": {
     "dataset": "",
+    "online": true,
     "include_tags": ["official"],
     "exclude_tags": [],
     "games": [],

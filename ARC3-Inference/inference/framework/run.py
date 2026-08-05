@@ -1091,6 +1091,17 @@ def _run(args: argparse.Namespace) -> None:
         game_ids, arcade_spec = _enter_competition_arcade(
             args, game_ids=game_ids, stack=stack
         )
+        if getattr(args, "online", False) and arcade_spec is None:
+            if not os.environ.get("ARC_API_KEY", "").strip():
+                log.warning(
+                    "--online set but ARC_API_KEY is empty; arc_agi will fall "
+                    "back to an anonymous key, which may be rate-limited or "
+                    "lack game access."
+                )
+            arcade_spec = taaf.game_api.ArcadeSpec(
+                operation_mode=taaf.game_api.arc_agi.OperationMode.ONLINE,
+                environments_dir="",
+            )
         if args.list_games:
             for game_id in game_ids:
                 print(game_id)
@@ -1219,6 +1230,17 @@ def main() -> None:
     parser.add_argument("--exclude-tags", dest="exclude_tags", default="")
     parser.add_argument(
         "--environments-dir", dest="environments_dir", default=None
+    )
+    parser.add_argument(
+        "--online",
+        dest="online",
+        action="store_true",
+        default=False,
+        help=(
+            "Play against the live ARC-AGI-3 API "
+            "(https://three.arcprize.org) instead of offline env files. "
+            "Reads ARC_API_KEY from the environment."
+        ),
     )
     parser.add_argument("--datasets-dir", dest="datasets_dir", default=None)
     parser.add_argument(

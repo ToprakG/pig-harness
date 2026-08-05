@@ -41,6 +41,13 @@ export OPENROUTER_API_KEY=<your-openrouter-api-key>
 CONFIG_PATH=configs/inference.openrouter.json make interactive
 ```
 
+Run through DeepInfra instead:
+
+```bash
+export DEEPINFRA_API_KEY=<your-deepinfra-api-key>
+CONFIG_PATH=configs/inference.deepinfra.json make interactive
+```
+
 Open the viewer:
 
 ```bash
@@ -95,7 +102,8 @@ The main config is strict JSON. Comments are not supported.
 
 - `configs/inference.json` is the default local-vLLM / Slurm config.
 - `configs/inference.openrouter.json` uses OpenRouter.
-- `configs/eval.json` selects runs for `make eval`.
+- `configs/inference.deepinfra.json` uses DeepInfra.
+- `configs/eval.json` selects runs for `make eval` (supports `provider` profiles: `local`, `openrouter`, `deepinfra`).
 - `configs/significance.json` selects score files for `make significance`.
 
 Use a different config with:
@@ -330,6 +338,14 @@ Evaluate runs from `configs/eval.json`:
 
 ```bash
 make eval
+```
+
+Evaluate DeepInfra runs:
+
+```bash
+EVAL_CONFIG_PATH=configs/eval.deepinfra.json make eval
+# or
+EVAL_PROVIDER=deepinfra make eval
 ```
 
 Write a score file somewhere specific:

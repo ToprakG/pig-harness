@@ -6,19 +6,20 @@
     "context_window": 32768
   },
   "experiments": {
-    "root_dir": "runs/{username}"
+    "root_dir": "deepinfra-runs/{username}"
   },
   "environment": {
     "dataset": "",
+    "online": true,
     "include_tags": ["official"],
     "exclude_tags": [],
     "games": [],
     "max_steps": null,
-    "max_runtime_minutes": 45,
+    "max_runtime_minutes": 90,
     "max_experiment_runtime_minutes": null,
     "max_experiment_runtime_hours": null,
-    "n_passes": 1,
-    "concurrent_jobs": 9
+    "n_passes": 5,
+    "concurrent_jobs": 8
   },
   "deployment": {
     "target": "inline",
@@ -44,12 +45,15 @@
     "language_model_only": false,
     "enable_prefix_caching": true,
     "tool_call_parser": "qwen3_coder",
-    "reasoning_parser": "qwen3"
+    "reasoning_parser": "qwen3",
+    "default_chat_template_kwargs": {
+      "preserve_thinking": true
+    }
   },
   "analyzer": {
     "app_name": "ARC3 Agent Harness",
     "max_output": 0,
-    "thinking": false,
+    "thinking": true,
     "temperature": 0.6,
     "top_p": 0.95,
     "top_k": 20,
@@ -67,10 +71,10 @@
     "thinking": false
   },
   "viewer": {
-    "port": 8011
+    "port": 8025
   },
   "multimodal": {
     "context": "current_grid",
-    "upscale": 4
+    "upscale": 16
   }
 }
