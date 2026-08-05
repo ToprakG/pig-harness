@@ -129,3 +129,56 @@ Answering the mission's fact #2 (why no meta evidence in the 0.91 run):
 the policy had NO stdout logging at all before this phase — restarts were
 tagged only into viewer_data artifacts. With this phase, fired AND
 suppressed decisions are stdout lines.
+
+## Phase 4 — budget planner evidence (3-game smoke, stub LLM)
+
+Dry-run planning (competition shape, 25 games / 1 pass / concurrency 28):
+
+    per_game_seconds=10800 (capped from 26010) planned_wallclock=10800s (33% of grant)
+
+and with sequential waves (concurrency 6):
+
+    jobs=25x1 concurrency=6 waves=5
+    per_game_seconds=5202 planned_wallclock=26010s (80% of grant)
+
+Root cause of fact #4 (81% of grant unused) is now explicit: with
+concurrency 28 all 25 games run in ONE wave, so wall-clock utilisation is
+bounded by the *per-game* cap, not by the number of games. Raising
+utilisation therefore means raising per-game time (and/or lowering
+concurrency so more waves exist) — never adding passes, since the scored
+rerun forces n_passes=1 (Phase 3).
+
+Smoke (granted=600s, margin=60s, util=0.85, cap=200s, 3 games sequential):
+
+    ==================== BUDGET PLAN ====================
+    granted=600s margin=60s target_utilisation=85%
+    jobs=3x1 concurrency=1 waves=3
+    per_game_seconds=153 planned_wallclock=459s (76% of grant)
+    =====================================================
+    [BUDGET] game=ar25-0c556536 planned=153 used=154 util=101%
+    [BUDGET] game=sb26-7fbdac44 planned=153 used=154 util=101%
+    [BUDGET] game=r11l-495a7899 planned=153 used=154 util=100%
+
+## Phase 5 — compaction modes (implemented, neither enabled by default)
+
+* **Option A `mode: "async"`** — `AsyncCompactor` runs the summarisation in
+  a daemon thread; `submit()` returns immediately, `poll()` swaps the digest
+  in when it lands, single-flight, timeout default raised to 60 s, and a
+  block that arrives while busy is requeued (never dropped). Failures keep
+  the previous digest and can never propagate into the agent loop.
+* **Option B `mode: "external_history"`** — no summarisation at all. Every
+  executed action is appended to `<game>_history.jsonl`; the sandbox gains
+  `history_search(pattern, last_n=None)`, `history_tail(n)`,
+  `history_at(action_num)`, `history_stats()` over a host RPC, and the
+  prompt gains one additive line telling the agent these exist. Records are
+  clipped per-record; search falls back to substring on an invalid regex.
+
+Unit coverage: `tests/observability/test_compaction_modes.py` (12 tests)
+— async non-blocking/swap-in/failure-preserves-digest/single-flight/requeue,
+history roundtrip/clipping/regex-fallback/agent-integration, plus an AST
+guard proving the helpers contain no game-identity or board-content
+conditioning in executable code.
+
+**No winner declared.** Per the mission's measurement rule this needs the
+Phase 6 replicate protocol (≥4 replicates); the smoke runs only prove the
+mechanics work.

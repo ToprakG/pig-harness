@@ -30,6 +30,7 @@ import taaf.game
 import taaf.game_api
 
 from inference.framework.kaggle import DUCK_HARNESS_PUBLIC_GAME_IDS
+from inference.framework.budget import BudgetConfig, format_plan, plan_budget
 from inference.framework.solver import HarnessSolver
 from inference.utils.run_artifacts import save_git_info, setup_experiment_directory
 
@@ -414,6 +415,7 @@ def _make_solver(
     *,
     run_dir: Path,
     max_runtime_minutes_per_game: float,
+    game_ids: list[str] | None = None,
 ) -> HarnessSolver:
     start_local_server = str(
         args.deployment_target
@@ -424,12 +426,32 @@ def _make_solver(
     effective_concurrency = _effective_concurrent_jobs(args)
     raw_meta = str(getattr(args, "meta_config", "") or "").strip()
     meta_config = json.loads(raw_meta) if raw_meta else None
+
+    # Budget planner (Phase 4): when enabled, per-game runtime comes from the
+    # wall-clock grant instead of the configured cap, so the granted compute
+    # is actually used. Disabled => the configured cap is unchanged.
+    raw_budget = str(getattr(args, "budget_config", "") or "").strip()
+    budget_config = BudgetConfig.from_dict(
+        json.loads(raw_budget) if raw_budget else None)
+    runtime_s_per_game = max_runtime_minutes_per_game * 60.0
+    budget_plan = None
+    if budget_config.enabled:
+        budget_plan = plan_budget(
+            budget_config,
+            n_games=max(1, len(game_ids or [])),
+            n_passes=max(1, int(getattr(args, "n_passes", 1) or 1)),
+            concurrency=effective_concurrency,
+        )
+        runtime_s_per_game = float(budget_plan["per_game_seconds"])
+        print(format_plan(budget_plan), flush=True)
+
     return HarnessSolver(
         label=args.agent,
         model=args.model,
         analyzer_timeout=getattr(args, "analyzer_timeout", 120),
         max_actions_per_game=args.max_actions,
-        max_runtime_s_per_game=max_runtime_minutes_per_game * 60.0,
+        max_runtime_s_per_game=runtime_s_per_game,
+        budget_plan=budget_plan,
         meta_config=meta_config,
         concurrency=effective_concurrency,
         save_request_logs=bool(args.analyzer_save_request_logs),
@@ -1050,6 +1072,7 @@ def _run_split_slurm_local_servers(
             child_args,
             run_dir=child_dir,
             max_runtime_minutes_per_game=runtime,
+            game_ids=game_ids,
         )
         benchmark = taaf.benchmark.Benchmark(
             label=child_label,
@@ -1129,6 +1152,7 @@ def _run(args: argparse.Namespace) -> None:
             solver_args,
             run_dir=run_dir,
             max_runtime_minutes_per_game=max_runtime_minutes_per_game,
+            game_ids=game_ids,
         )
         benchmark = taaf.benchmark.Benchmark(
             label=args.run_name or args.agent,
@@ -1265,6 +1289,16 @@ def main() -> None:
         help=(
             "JSON object for the probabilistic-restart meta layer "
             '(e.g. \'{"enabled": true}\'). Empty keeps it disabled.'
+        ),
+    )
+    parser.add_argument(
+        "--budget-config",
+        dest="budget_config",
+        default="",
+        help=(
+            "JSON object for the wall-clock budget planner "
+            '(e.g. \'{"enabled": true, "granted_seconds": 32400}\'). '
+            "When enabled, per-game runtime is derived from the grant."
         ),
     )
     parser.add_argument(

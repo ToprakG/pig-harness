@@ -353,6 +353,32 @@ _SANDBOX_BOOTSTRAP = textwrap.dedent(
             runtime_globals["valid_actions"] = [str(item) for item in state_payload.get("valid_actions", [])]
             runtime_globals["last_action_result"] = action_result
 
+        runtime_globals["history_search"] = history_search
+        runtime_globals["history_tail"] = history_tail
+        runtime_globals["history_at"] = history_at
+        runtime_globals["history_stats"] = history_stats
+
+        def _history_rpc(op, **kwargs):
+            # Query the external trajectory log kept by the host: generic
+            # text/JSONL search over past turns, no game-specific knowledge.
+            _send({"type": "history", "op": op, "kwargs": kwargs})
+            reply = _recv()
+            if reply.get("type") != "history_result":
+                raise RuntimeError("Invalid history response from sandbox host.")
+            return reply.get("result")
+
+        def history_search(pattern, last_n=None):
+            return _history_rpc("search", pattern=str(pattern), last_n=last_n)
+
+        def history_tail(n=10):
+            return _history_rpc("tail", n=int(n))
+
+        def history_at(action_num):
+            return _history_rpc("at", action_num=int(action_num))
+
+        def history_stats():
+            return _history_rpc("stats")
+
         def action(actions):
             normalized_actions = _normalize_actions(actions)
             _send({"type": "action", "actions": normalized_actions})
@@ -451,6 +477,7 @@ def run_sandboxed_python(
     timeout_seconds: int,
     initial_state: dict[str, Any],
     action_handler: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    history_handler: Callable[[str, dict[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="rgb_python_tool_") as sandbox_dir:
         host_action_results: list[dict[str, Any]] = []
@@ -534,6 +561,16 @@ def run_sandboxed_python(
                 }
 
             msg_type = str(message.get("type", "")).strip()
+            if msg_type == "history":
+                try:
+                    result = (history_handler(str(message.get("op", "")),
+                                              dict(message.get("kwargs") or {}))
+                              if history_handler is not None else None)
+                except Exception:  # noqa: BLE001
+                    result = None
+                _send_json_line(process.stdin,
+                                {"type": "history_result", "result": result})
+                continue
             if msg_type == "action":
                 try:
                     action_result_payload = action_handler(list(message.get("actions") or []))

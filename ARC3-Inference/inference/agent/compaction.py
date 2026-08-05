@@ -54,15 +54,28 @@ def _default_estimate_tokens(value: Any) -> int:
 
 @dataclass
 class CompactionConfig:
-    """Mirrors the ``compaction`` block in configs/inference.json."""
+    """Mirrors the ``compaction`` block in configs/inference.json.
+
+    ``mode`` selects the strategy:
+      * ``sync``             — original blocking summarisation (the 0.91 run;
+                               1488 timeouts, zero successes on a saturated
+                               single-GPU server — do not use there)
+      * ``async``            — same summarisation off the critical path
+      * ``external_history`` — no summarisation at all; the trajectory is
+                               written to JSONL and searched on demand
+    """
 
     enabled: bool = False
+    mode: str = "sync"
     digest_max_tokens: int = 700
     compaction_call_max_tokens: int = 900
     compaction_timeout_s: float = 20.0
     min_dropped_tokens_to_compact: int = 800
     wipe_knowledge_on_level_transition: bool = True
     wipe_knowledge_on_reset: bool = True
+    # external_history only
+    history_tail_records: int = 10
+    history_max_matches: int = 20
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "CompactionConfig":
@@ -86,6 +99,97 @@ class CompactionStats:
             f"wallclock_s={self.compaction_wallclock_s:.2f} "
             f"digest_tokens={digest_tokens}"
         )
+
+
+class AsyncCompactor:
+    """Off-critical-path compaction (mode ``async``).
+
+    ``submit`` starts one background summarisation and returns immediately;
+    the agent keeps playing with the un-compacted context. The result is
+    swapped into the digest by the next ``poll`` after it arrives. At most
+    one call is in flight; further drops queue into the pending buffer of
+    the caller. On timeout/failure the previous digest is kept.
+    """
+
+    def __init__(self, digest: "HistoryDigest", llm_call, *,
+                 config: CompactionConfig, stats: CompactionStats,
+                 estimate_tokens=None, context: str = ""):
+        import threading
+
+        self.digest = digest
+        self.llm_call = llm_call
+        self.config = config
+        self.stats = stats
+        self.estimate = estimate_tokens or _default_estimate_tokens
+        self.context = context
+        self._lock = threading.Lock()
+        self._thread = None
+        self._result: tuple[str, int, int, int] | None = None  # text, dropped, latency_ms, ok
+        self._error: str | None = None
+
+    @property
+    def busy(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def submit(self, dropped_messages: list[dict[str, Any]]) -> bool:
+        """Start a background compaction. Returns False if one is in flight
+        or the block is too small to be worth a call."""
+        import threading
+
+        if self.busy:
+            return False
+        dropped_text = render_dropped_messages(dropped_messages)
+        if not dropped_text.strip():
+            return False
+        dropped_tokens = self.estimate(dropped_text)
+        if dropped_tokens < self.config.min_dropped_tokens_to_compact:
+            return False
+        prompt = build_compaction_prompt(dropped_text, self.digest.text,
+                                         self.config.digest_max_tokens)
+
+        def worker() -> None:
+            started = time.monotonic()
+            try:
+                text = self.llm_call(prompt,
+                                     self.config.compaction_call_max_tokens,
+                                     self.config.compaction_timeout_s)
+                latency_ms = int((time.monotonic() - started) * 1000)
+                with self._lock:
+                    self._result = (str(text or "").strip(), dropped_tokens,
+                                    latency_ms, 1)
+            except Exception as exc:  # never propagate into the agent loop
+                latency_ms = int((time.monotonic() - started) * 1000)
+                with self._lock:
+                    self._result = ("", dropped_tokens, latency_ms, 0)
+                    self._error = type(exc).__name__
+
+        self._thread = threading.Thread(target=worker, daemon=True,
+                                        name="compaction-async")
+        self._thread.start()
+        return True
+
+    def poll(self) -> bool:
+        """Swap in a finished digest if one is ready. Never blocks."""
+        from inference.framework import observability
+
+        with self._lock:
+            result, error = self._result, self._error
+            self._result = self._error = None
+        if result is None:
+            return False
+        text, dropped_tokens, latency_ms, ok = result
+        self.stats.compaction_wallclock_s += latency_ms / 1000.0
+        if not ok or not text:
+            self.stats.compaction_fallbacks += 1
+            reason = error or "empty_response"
+            logger.warning("compaction_fallback (async): %s", reason)
+            observability.compact_fallback_line(self.context, reason, latency_ms)
+            return False
+        self.digest.replace(text)
+        self.stats.compaction_events += 1
+        observability.compact_ok_line(self.context, dropped_tokens,
+                                      self.digest.tokens(), latency_ms)
+        return True
 
 
 class HistoryDigest:

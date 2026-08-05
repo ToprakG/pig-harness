@@ -108,6 +108,13 @@
     "min_dropped_tokens_to_compact": 800,
     "wipe_knowledge_on_level_transition": true,
     "wipe_knowledge_on_reset": true
-
+  },
+  "budget": {
+    "enabled": false,
+    "granted_seconds": 32400,
+    "target_utilisation": 0.85,
+    "safety_margin_seconds": 1800,
+    "allocation": "uniform",
+    "max_seconds_per_game": 10800
   }
 }

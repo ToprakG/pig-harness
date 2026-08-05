@@ -15,6 +15,7 @@ import requests
 
 from inference.agent.action_names import to_engine_action, to_model_action
 from inference.agent.compaction import (
+    AsyncCompactor,
     CompactionConfig,
     CompactionStats,
     HistoryDigest,
@@ -36,6 +37,7 @@ from inference.agent.vision_context import (
     current_grid_image_part,
 )
 
+from inference.agent.external_history import ExternalHistory
 from inference.agent.python_tool_sandbox import run_sandboxed_python
 from inference.agent.runtime_state import Frame, HistoryEntry, RUNTIME_STATE_FILENAME, load_runtime_state
 from inference.utils.openai_compat import build_chat_payload, build_headers
@@ -986,6 +988,8 @@ class ToolAgent:
         )
         self._compaction_stats = CompactionStats()
         self._compaction_pending: list[dict[str, Any]] = []
+        self._compactor = None
+        self._external_history = None
 
     def _headers(self) -> dict[str, str]:
         api_key = (
@@ -1025,6 +1029,8 @@ class ToolAgent:
             self._history_digest.clear()
             self._compaction_stats = CompactionStats()
             self._compaction_pending = []
+            self._compactor = None
+            self._external_history = None
 
     @property
     def total_tokens(self) -> int:
@@ -1285,6 +1291,14 @@ class ToolAgent:
             "but stop immediately if a result reports `game_over`, `run_complete`, `level_completed`, or `done`."
         )
         lines.extend(self._summarized_knowledge_lines())
+        if (self._compaction_config.enabled
+                and self._compaction_config.mode == "external_history"):
+            lines.append(
+                "The full trajectory so far is stored outside this context. "
+                "Inside `python` you may call `history_tail(n)`, "
+                "`history_search(pattern, last_n=None)`, `history_at(action_num)`, "
+                "and `history_stats()` to retrieve any earlier observation."
+            )
         if self._compaction_config.enabled:
             # guaranteed layer underneath the self-reported scientist notes
             lines.extend(self._history_digest.render_lines())
@@ -1603,6 +1617,7 @@ class ToolAgent:
             timeout_seconds=self._python_timeout,
             initial_state=_serialized_runtime_state(),
             action_handler=_handle_action,
+            history_handler=self._history_handler,
         )
 
         action_results = [
@@ -1752,6 +1767,57 @@ class ToolAgent:
         self._compact_dropped(dropped_blocks)
         return [system_message, *history]
 
+    def _history_store(self):
+        """Per-session external trajectory log (mode ``external_history``)."""
+        cfg = self._compaction_config
+        if not cfg.enabled or cfg.mode != "external_history":
+            return None
+        if self._external_history is None and self._session_runtime_dir is not None:
+            context = getattr(self, "_log_context", "session")
+            self._external_history = ExternalHistory(
+                self._session_runtime_dir / f"{context}_history.jsonl",
+                max_matches=cfg.history_max_matches,
+            )
+        return self._external_history
+
+    def record_history_event(self, record: dict[str, Any]) -> None:
+        """Append one trajectory record (no-op unless external_history)."""
+        store = self._history_store()
+        if store is not None:
+            store.append(record)
+
+    def _history_handler(self, op: str, kwargs: dict[str, Any]) -> Any:
+        """Sandbox RPC surface for the history helpers (generic search only)."""
+        store = self._history_store()
+        if store is None:
+            return None
+        if op == "search":
+            return store.search(str(kwargs.get("pattern", "")),
+                                last_n=kwargs.get("last_n"))
+        if op == "tail":
+            return store.tail(int(kwargs.get("n", 10)))
+        if op == "at":
+            return store.at(int(kwargs.get("action_num", -1)))
+        if op == "stats":
+            return store.stats()
+        return None
+
+    def _async_compactor(self):
+        """Lazily built per-session async compactor (mode ``async``)."""
+        context = getattr(self, "_log_context", "unknown")
+        compactor = getattr(self, "_compactor", None)
+        if compactor is None or compactor.context != context:
+            compactor = AsyncCompactor(
+                self._history_digest,
+                self._compaction_llm_call,
+                config=self._compaction_config,
+                stats=self._compaction_stats,
+                estimate_tokens=_estimate_tokens,
+                context=context,
+            )
+            self._compactor = compactor
+        return compactor
+
     def _compact_dropped(self, dropped: list[dict[str, Any]]) -> None:
         """C1 hook: route an about-to-be-dropped block into the digest.
 
@@ -1763,12 +1829,20 @@ class ToolAgent:
         cfg = self._compaction_config
         if not cfg.enabled or not dropped:
             return
+        if cfg.mode == "external_history":
+            return  # nothing to summarize: the trajectory file holds it all
         self._compaction_pending.extend(dropped)
         pending_text = _render_dropped_messages(self._compaction_pending)
         if _estimate_tokens(pending_text) < cfg.min_dropped_tokens_to_compact:
             return
         pending = self._compaction_pending
         self._compaction_pending = []
+        if cfg.mode == "async":
+            compactor = self._async_compactor()
+            compactor.poll()                    # swap in a finished digest
+            if not compactor.submit(pending):   # busy? keep the block queued
+                self._compaction_pending = pending + self._compaction_pending
+            return
         _compact_history(
             pending,
             self._history_digest,

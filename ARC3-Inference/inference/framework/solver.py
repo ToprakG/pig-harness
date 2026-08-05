@@ -829,6 +829,18 @@ class _HarnessGameSession:
             # feeds the restart policy's ring buffers; the grid is hashed
             # inside note_action and never stored
             meta.note_action(board_changed, _grid_from_state(new_state))
+        recorder = getattr(self.analyzer, "record_history_event", None)
+        if recorder is not None:
+            # external-history mode: append the trajectory record (no-op in
+            # every other mode)
+            recorder({
+                "action_num": self.action_count,
+                "level": _level_number(self.game),
+                "action": action_display,
+                "board_changed": board_changed,
+                "level_completed": level_completed,
+                "board_ascii": current_frame.ascii,
+            })
         level_completed = bool(
             new_state.just_won_level and raw_state != arcengine.GameState.WIN
         )
@@ -911,6 +923,9 @@ class HarnessSolver(Solver):
     # Probabilistic-restart meta layer (inference/meta). None or
     # {"enabled": false, ...} keeps the solver byte-identical to upstream.
     meta_config: dict[str, Any] | None = None
+    # Resolved wall-clock plan from inference.framework.budget (None when the
+    # planner is disabled); printed in the banner and used for accounting.
+    budget_plan: dict[str, Any] | None = None
     analyzer_factory: AnalyzerFactory | None = field(
         default=None, repr=False, compare=False
     )
@@ -1083,7 +1098,7 @@ class HarnessSolver(Solver):
             max_runtime_s_per_game=self.max_runtime_s_per_game,
             max_actions_per_game=self.max_actions_per_game,
             concurrency=self.concurrency,
-            budget_plan=getattr(self, "_budget_plan", None),
+            budget_plan=self.budget_plan,
         )
         if self.start_local_server:
             self._start_local_servers()
@@ -1096,9 +1111,8 @@ class HarnessSolver(Solver):
         accounting = getattr(self, "_run_accounting", None)
         if accounting is not None:
             granted = None
-            plan = getattr(self, "_budget_plan", None)
-            if plan:
-                granted = plan.get("granted_seconds")
+            if self.budget_plan:
+                granted = self.budget_plan.get("granted_seconds")
             elif self.max_runtime_s_per_game:
                 granted = self.max_runtime_s_per_game * max(1, len(accounting.games))
             accounting.print_block(granted_seconds=granted)

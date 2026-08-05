@@ -184,6 +184,7 @@ DEPLOYMENT_SLURM_LOCAL_SERVER_CONFIG ?= $(CONFIG_PATH)
 MULTIMODAL_CONTEXT ?= $(shell $(CONFIG_VALUE) multimodal.context)
 MULTIMODAL_UPSCALE ?= $(shell $(CONFIG_VALUE) multimodal.upscale 16)
 COMPACTION_CONFIG ?= $(shell $(CONFIG_VALUE) compaction)
+BUDGET_CONFIG ?= $(shell $(CONFIG_VALUE) budget)
 
 CHAT_BASE_URL ?= $(shell $(CONFIG_VALUE) chat.base_url $(LOCAL_ANALYZER_BASE_URL))
 CHAT_PROVIDER ?= $(shell $(CONFIG_VALUE) chat.provider $(LOCAL_ANALYZER_PROVIDER))
@@ -243,6 +244,7 @@ export LOCAL_ANALYZER_APP_NAME
 export MULTIMODAL_CONTEXT
 export MULTIMODAL_UPSCALE
 export COMPACTION_CONFIG
+export BUDGET_CONFIG
 export CHAT_PROVIDER
 export OPENROUTER_API_KEY
 export CEREBRAS_API_KEY
@@ -538,6 +540,7 @@ _taaf-run:
 		--model $(MODEL) \
 		--analyzer-timeout "$(ANALYZER_TIMEOUT)" \
 		$(if $(strip $(META_CONFIG_JSON)),--meta-config '$(META_CONFIG_JSON)',) \
+		$(if $(strip $(BUDGET_CONFIG)),--budget-config '$(BUDGET_CONFIG)',) \
 		--deployment-target "$(DEPLOYMENT_TARGET)" \
 		$(if $(filter true TRUE 1 yes YES on ON,$(DEPLOYMENT_WAIT)),--deployment-wait,--no-deployment-wait) \
 		$(if $(filter-out [],$(strip $(DEPLOYMENT_SOURCE_REPOS))),--deployment-source-repos '$(DEPLOYMENT_SOURCE_REPOS)',) \
