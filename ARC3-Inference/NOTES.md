@@ -414,3 +414,76 @@ is a hypothesis for the ablation's secondary metrics, not a finding.
 `arc_agi` client, not ours). The Phase 4 runner must retry such runs and
 exclude them from the denominator rather than counting them as failures to
 clear level 1.
+
+# feat/stall-reflect
+
+## Phase 0 — branch and config
+
+Cut from `feat/level-debrief` @ `6a0c3c1`. `reflect.*` config added
+(disabled); `debrief.*` untouched.
+
+## Phase 1 — detector calibration (BLOCKING gate)
+
+### Reference reproduced exactly
+
+`uv run python -m inference.reflect.calibrate reference`:
+
+    runs(>= 25 actions) = 498   (reference 498)
+    stalled = 161 (32%)         (reference 161)
+    clear rate | stalled     = 0.13   (reference 0.13)
+    clear rate | never stall = 0.68   (reference 0.68)
+    discrimination = 5.2x
+    median first stall = 25     (reference 25)
+    REFERENCE: REPRODUCED
+
+All four figures land exactly. The premise of the branch holds at the
+population level.
+
+### Sweep — and two findings that qualify it
+
+    noop   nov  fire%  clr|fire  clr|no   disc  med t
+     0.20  0.40    32%      0.13    0.68    5.2     25
+     0.20  0.50    32%      0.13    0.68    5.2     25
+     0.20  0.60    32%      0.13    0.68    5.2     25
+     0.25  0.40    32%      0.13    0.68    5.2     25
+     0.25  0.50    32%      0.13    0.68    5.2     25
+     0.25  0.60    32%      0.13    0.68    5.2     25
+     0.30  0.40    28%      0.14    0.64    4.6     35
+     0.30  0.50    28%      0.14    0.64    4.6     35
+     0.30  0.60    28%      0.14    0.64    4.6     35
+
+**Finding 1 — the novelty signal never fires on its own.** Every column is
+identical across `novelty_threshold`, and the direct count confirms it:
+noop-only 117 runs, **novelty-only 0**, both 44. The median `novelty_30` is
+0.93 (1st percentile 0.40): board states are nearly always distinct, so the
+repetition signal has essentially no independent mass in this data. The
+detector is, empirically, a no-op-rate detector. Keeping the novelty clause
+costs nothing and may matter on other games, but it must not be described as
+a second signal here.
+
+**Finding 2 — most of the 5.2x is between games, not within.** LOGO selection
+picks 0.20/0.40 in 25/25 folds, but that unanimity is an artefact of ties
+(the whole 0.20–0.25 block is identical in-sample, and my tie-break took the
+first cell). The number that matters: **median held-out discrimination 1.33**,
+versus 5.2 in-sample. Per game, among the 8 games with >=3 runs on each side:
+
+    ar25 stalled 0.50 | never 0.92      cd82 stalled 0.19 | never 0.50
+    cn04 stalled 0.00 | never 0.19      ft09 stalled 0.62 | never 0.83
+    g50t stalled 0.06 | never 0.00      ka59 stalled 0.22 | never 0.82
+    ls20 stalled 0.00 | never 0.31      sc25 stalled 0.12 | never 0.00
+    median within-game gap = +0.26 (never − stalled)
+
+So stalling does predict failure within a game, but the effect is roughly a
+26-point rate gap, not a 5x ratio. The population 5.2x is inflated by a
+confound: hard games both stall more and clear less. **The realistic target
+for this intervention is the within-game gap, and the ablation must be
+powered against that, not against 0.13 vs 0.68.**
+
+### Threshold choice
+
+The 0.20–0.25 block is tied on every metric, so LOGO cannot discriminate
+inside it. Rather than take an arbitrary corner, the **pre-registered
+defaults `noop_threshold=0.25`, `novelty_threshold=0.5` are kept**: they sit
+on the tie plateau, and picking 0.20/0.40 purely because it was evaluated
+first would be exactly the overfitting the LOGO procedure exists to prevent.
+Recorded as a deliberate choice, not an oversight.

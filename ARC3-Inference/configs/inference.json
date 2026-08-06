@@ -93,5 +93,17 @@
     "temperature": 0.3,
     "include_baseline": false,
     "min_actions_for_debrief": 5
+  },
+  "reflect": {
+    "enabled": false,
+    "noop_threshold": 0.25,
+    "novelty_threshold": 0.5,
+    "min_actions_before_first_revise": 20,
+    "cooldown_actions": 25,
+    "max_revisions_per_level": 2,
+    "eval_window": 20,
+    "max_tokens": 250,
+    "timeout_s": 90,
+    "temperature": 0.3
   }
 }
