@@ -16,7 +16,7 @@
     "exclude_tags": [],
     "games": [],
     "max_steps": null,
-    "max_runtime_minutes": 45,
+    "max_runtime_minutes": 90,
     "max_experiment_runtime_minutes": null,
     "max_experiment_runtime_hours": null,
     "n_passes": 20,
