@@ -248,9 +248,14 @@ class _HarnessGameSession:
             remaining = self.timing_payload()["time_remaining_seconds"]
             if remaining is not None:
                 candidates.append(float(remaining))
-        soft_remaining = self.solver.soft_time_remaining_seconds()
-        if soft_remaining is not None:
-            candidates.append(soft_remaining)
+        # soft_end_time is deliberately NOT a candidate. It is a session-wide
+        # pacing hint (taaf/solver.py:42: "solvers never need to check the
+        # clock themselves"), not a per-request budget. Once it passes, it
+        # stays at 0.0 for every game that starts afterwards, flooring this
+        # timeout at 0.1s so no request can ever complete -- and should_stop()
+        # has no soft-deadline check, so nothing ends the resulting spin.
+        # The per-game term above is self-limiting: it reaches 0 exactly when
+        # runtime_limit_reached() makes should_stop() true.
         if not candidates:
             return None
         return max(0.1, min(candidates))
