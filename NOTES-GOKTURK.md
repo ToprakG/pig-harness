@@ -140,3 +140,94 @@ sebeple şüpheli — oradaki tek 1.19'luk pass muhtemelen gürültü.
 **Düzeltme:** süreyi 30-45 dk'ya çıkar, eşzamanlılığı düşür (her koşu daha
 çok istek payı alsın), pass sayısını azalt. Uzun koşu zaten şart: compaction
 ancak bağlam dolunca devreye giriyor.
+
+## Zaman aşımı çöküşü — gerçek kök neden ve düzeltme
+
+Yukarıdaki #2 teşhisi eksikti. "Oyunun kendi süre sınırına yaklaşınca timeout
+çöküyor" açıklaması mekanizmayı doğru anlatmıyor, çünkü oyun-başı kalan süre
+**kendi kendini sınırlıyor**: `remaining` sıfıra ulaştığı an
+`runtime_limit_reached()` true oluyor ve `should_stop()` döngüyü zaten
+kesiyor. Bu terim en fazla tek bir ölü istek üretebilir.
+
+Süresiz dönmeye yol açan terim `soft_remaining`. `soft_end_time` **oturum
+geneli** bir işarettir, oyun başına değil — `taaf/deploy_inline.py:110`:
+
+```python
+_buffer = min(_SOFT_DEADLINE_BUFFER_S, _budget / 2)
+soft_end_time = datetime.now() + timedelta(seconds=_budget - _buffer)
+```
+
+### Doğrulanan (kod + birincil kaynak)
+
+`soft_end_time` formülü `ab-baseline` artefaktlarında birebir üretiliyor:
+
+| kaynak | değer |
+|---|---|
+| `deploy_meta.json` → `target_config.max_runtime_s` | 2400 s |
+| `deploy_meta.json` → `started_at` | 00:58:00.697 |
+| hesap: `_buffer = min(600, 2400/2)` = 600 → `started_at + 1800 s` | 01:28:00.697 |
+| `stdout.log` → `deploy.inline: soft_end_time` | 01:28:00.698 |
+
+Buradan çıkan mekanizma, tamamen kod okumasıyla:
+
+1. `soft_time_remaining_seconds()` soft deadline geçtikten sonra kalıcı
+   olarak **0.0** döner (`max(0.0, ...)`).
+2. `request_timeout_seconds()` bunu `min()` içine katıyor ve sonucu
+   `max(0.1, ...)` ile tabanlıyor → istek timeout'u **0.1 s**.
+3. `should_stop()` içinde soft deadline kontrolü **yok** → döngü bitmiyor,
+   1 s'lik retry backoff ile saniyede ~1 ölü istek.
+
+Oyun-başı terim bu soruna yol açamaz: `remaining` sıfıra ulaştığı an
+`runtime_limit_reached()` true olur ve `should_stop()` keser. Yani sınırsız
+dönmeyi mümkün kılan **tek** terim `soft_remaining`.
+
+### Çıkarım (doğrulanamadı)
+
+A/B #2'deki 5.788 `read timeout=0.1` hatasının bu mekanizmadan geldiği
+**çıkarımdır, ölçüm değildir.** O koşunun logları `/tmp/pig-ab` altındaydı
+ve silinmiş; geri getirilemiyor. Elimizdeki koşularda (`ab-baseline` dahil)
+`timeout=0.1` **hiç geçmiyor** — bu mekanizmayla çelişmiyor (tek dalga,
+soft deadline sonrası başlayan oyun yok) ama onu kanıtlamıyor da.
+
+Ayrıca dikkat: `run_ab.sh` `--max-runtime-minutes 10` veriyor, bu **oyun
+başı** sınırı ayarlıyor; oturum `max_runtime_s`'i ayrı bir yoldan geliyor
+(`ab-baseline`'da 1800 s'e karşı 2400 s). A/B #2 için o iki sayının ne
+olduğu bilinmiyor, dolayısıyla "ikinci dalga tam soft deadline dolarken
+başlıyor" aritmetiği o koşu için gösterilmiş değil.
+
+**Düzeltme** (`inference/framework/solver.py`): `soft_remaining` aday listesinden
+çıkarıldı. TAAF'ın kendi sözleşmesi bunu zaten söylüyor (`taaf/solver.py:42`):
+
+> `soft_end_time`: indicative pacing hint. Cancellation is enforced by
+> `Benchmark` via `task.cancel()` — solvers never need to check the clock
+> themselves.
+
+Yani oturum düzeyinde bir tempo işareti, ağ isteği bütçesi olarak
+kullanılmamalıydı.
+
+`should_stop()`'a bilerek soft deadline kontrolü **eklenmedi**: bu, oyunların
+ne zaman bittiğini değiştirir, dolayısıyla skorları değiştirir — hata
+düzeltmesi kılığında davranış değişikliği olur ve tam da geçerli kılmaya
+çalıştığımız A/B'yi kirletir.
+
+Doğrulama durumu: yerelde çalıştırılamadı. Gerçek sebep madde 2'de yazdığım
+`.pth` sorunu değil: proje ağacı **iCloud tarafından tahliye edilmiş**
+(`ls -lO` → `dataless`). Venv'in `site-packages` altında 616 dataless `.py`
+var; iCloud daemon materialize edemiyor (`brctl download` başarı dönüyor ama
+dosya dataless kalıyor, `brctl status` asılıyor). Bu yüzden her import,
+`find`, hatta `git commit` takılıyor. Kaynak dosyaların 27'si de temiz —
+sorun sadece venv ve bazı git scratch dosyalarında.
+
+Çözüm: projeyi iCloud senkronlu Desktop dışına taşı ve venv'i yeniden kur.
+Bu aynı zamanda boşluklu dizin sorununu da bitirir (iki engel, tek hamle):
+
+```bash
+mv "/Users/gokturkakman/Desktop/Exposure AI/pig-harness" ~/dev/pig-harness
+```
+
+Regresyon testi bu taşıma sonrası eklenmeli.
+
+**Bu düzeltme olmadan hiçbir A/B geçerli değil.** Sıradaki koşu, boyutu da
+düzeltilmeden tekrarlanmamalı: 2 oyun × 3 pass gürültü bandının çok altında
+(A/B #1 tam olarak bu yüzden sonuçsuz kaldı). Bir sonraki koşu ya açıkça
+"smoke test" etiketiyle yapılmalı, ya da anlamlı bir n ile.
