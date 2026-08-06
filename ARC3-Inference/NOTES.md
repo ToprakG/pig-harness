@@ -274,3 +274,32 @@ Design decisions worth recording:
   cannot be configured into creativity.
 
 `pytest tests/debrief -q` -> 31 passed.
+
+## Phase 3 — wiring and smoke
+
+`inference/debrief/runtime.py` holds one `DebriefRuntime` per game session:
+it records each executed action, and on `level_completed` builds the packet,
+fires the rewrite and hands the block to the agent
+(`ToolAgent.set_debrief_block`). The block is appended next to the existing
+knowledge block, never substituted for the base prompt, and
+`DebriefRuntime.reset()` asserts it does not survive into a new game (D3).
+
+End-to-end smoke through the real solver hook (fake game that actually
+completes a level, stubbed rewrite reply):
+
+    [DEBRIEF] ok game=fake-1111 level=1 tokens=89 latency_ms=0
+
+    --- next level's prompt contains: ---
+    LEVEL DEBRIEF (auto-generated from the previous level)
+    CONFIRMED MECHANICS: UP moves the object; SPACE does nothing.
+    DEAD ACTIONS: SPACE
+    WHAT CLEARED THE LAST LEVEL: LEFT made the target disappear.
+    FIRST THINGS TO TEST ON THIS LEVEL: probe UP; then LEFT; avoid SPACE.
+    end of world model.
+
+The rewrite call reuses the analyzer's own endpoint, headers and client, and
+reads `reasoning_content` when a thinking model spends its whole budget
+before emitting `content` (that failure mode has bitten a previous feature).
+
+**No conclusions are drawn from this smoke run** — it shows the mechanism
+fires and reaches the next level's prompt, nothing about whether it helps.
