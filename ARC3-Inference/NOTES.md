@@ -247,3 +247,30 @@ Three real packets:
  ]
 }
 
+
+## Phase 2 — rewrite call, parser, evidence validator
+
+`inference/debrief/rewrite.py`. Four failure paths, all falling back to the
+caller's existing block and none of them raising:
+
+| stub case | outcome |
+|---|---|
+| valid output | block rendered, `reason=ok`, no dropped lines |
+| timeout | `reason=TimeoutError`, `block=None` — caller keeps its block |
+| malformed (empty / prose / missing sections) | `reason=malformed_output` |
+| hallucinated action id | offending SECTION dropped, rest of block kept |
+
+Design decisions worth recording:
+* only `CONFIRMED MECHANICS` and `DEAD ACTIONS` are evidence-checked. The
+  other two sections are plans, not assertions, so naming an untried probe
+  there is legitimate.
+* a hallucination drops one section rather than the whole block — killing the
+  entire rewrite for one bad clause would throw away good evidence.
+* **validator bug caught by its own tests:** the first implementation matched
+  action-id candidates against an uppercased copy of the text, so ordinary
+  words ("recolours") were flagged as unevidenced ids. It now matches tokens
+  that are already uppercase in the model's reply.
+* temperature is clamped to <= 0.3 in `DebriefConfig.from_dict`; the call
+  cannot be configured into creativity.
+
+`pytest tests/debrief -q` -> 31 passed.
