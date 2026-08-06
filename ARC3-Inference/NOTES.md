@@ -550,3 +550,50 @@ Every designed behaviour is visible in that trace:
 **No conclusions from this smoke run.** It shows the loop fires, revises,
 evaluates, reverts and injects; it says nothing about whether any of that
 helps a real agent.
+
+## Phase 5 — the ablation is under-designed for the real effect
+
+Kaggle plumbing verified first: `DEBRIEF_CONFIG` and `REFLECT_CONFIG` are now
+baked into the kernel setup env (they were not — the same omission wasted a
+compaction run), `revise.py` ships in the source bundle, and the Makefile
+`SERVER_DEFAULT_CHAT_TEMPLATE_KWARGS` quoting bug was re-fixed on this branch
+(it was fixed on `fix/observability-and-budget`, which this branch does not
+descend from).
+
+`inference/reflect/ablation.py` recomputes the stall flag offline with the
+same detector, excludes runs that never opened (the `vc33` failure mode)
+rather than counting them as failures to clear, and reports Fisher +
+bootstrap CI + achieved power.
+
+### The problem, stated plainly
+
+`ablation power` (baseline 0.13, 3 comparisons, one-sided Fisher):
+
+    effect 0.13 -> 0.26 :  n=200 stalled runs/arm  (~625 runs/arm)
+    effect 0.13 -> 0.39 :  n= 75 stalled runs/arm  (~235 runs/arm)
+    effect 0.13 -> 0.60 :  n= 25 stalled runs/arm  (~ 79 runs/arm)
+
+Phase 1 measured the honest within-game gap at **+0.26** — that is the
+*entire* difference between stalled and never-stalled runs inside a game, so
+**0.39 is the ceiling of a perfect intervention** and anything above it is
+not achievable, only imaginable.
+
+Therefore:
+
+* the brief's `n >= 50` is powered for roughly `0.13 -> 0.45`, i.e. an effect
+  **larger than the ceiling**. Running it as specified risks a null result
+  that means nothing, because the design could not have detected a real,
+  plausible effect anyway;
+* a *perfect* intervention (closing the whole gap) needs **n=75 per arm**
+  ≈ 235 runs/arm ≈ 940 runs for 4 arms ≈ **38 Kaggle sessions ≈ 68 h**;
+* a *realistic* partial closure (half the gap) needs **n=200 per arm**
+  ≈ 2500 runs ≈ **100 sessions ≈ 180 h**.
+
+Dropping arm D (as the brief permits) cuts this by a quarter and reduces the
+correction to 2 comparisons; it does not change the order of magnitude.
+
+**Not started.** Launching 38–100 unattended Kaggle sessions is an operator
+decision, and running the under-powered n=50 version would manufacture
+exactly the uninformative result this project has already produced once
+(goal-hints, n=10, 8/10, uninformative in both directions). The criterion is
+not being loosened and no partial run will be reported as evidence.
