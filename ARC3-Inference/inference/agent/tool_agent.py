@@ -955,6 +955,18 @@ class ToolAgent:
         self._last_step_summary: dict[str, Any] | None = None
         self._last_action_result: dict[str, Any] | None = None
         self._summarized_knowledge = _empty_world_model()
+        # Level-debrief block: appended to the prompt, never replacing it, and
+        # discarded whenever a new game session starts (no cross-game carry).
+        self._debrief_block = ""
+
+    def set_debrief_block(self, block: str) -> None:
+        self._debrief_block = str(block or "").strip()
+
+    def debrief_block(self) -> str:
+        return self._debrief_block
+
+    def _debrief_lines(self) -> list[str]:
+        return [self._debrief_block] if self._debrief_block else []
 
     def _headers(self) -> dict[str, str]:
         api_key = (
@@ -984,6 +996,7 @@ class ToolAgent:
             self._last_step_summary = None
             self._last_action_result = None
             self._summarized_knowledge = _empty_world_model()
+            self._debrief_block = ""
 
     @property
     def total_tokens(self) -> int:
@@ -1236,6 +1249,7 @@ class ToolAgent:
             "but stop immediately if a result reports `game_over`, `run_complete`, `level_completed`, or `done`."
         )
         lines.extend(self._summarized_knowledge_lines())
+        lines.extend(self._debrief_lines())
         lines.append("end of world model. ")
         if action_num == 0:
             lines.append(

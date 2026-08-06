@@ -19,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+import requests
+
 import arcengine
 import taaf.game
 from taaf.solver import Solver
@@ -35,6 +37,7 @@ from inference.agent.runtime_state import (
     write_runtime_state,
 )
 from inference.agent.tool_agent import ToolAgent
+from inference.debrief.runtime import DebriefRuntime, load_config as load_debrief_config
 from inference.framework.kaggle import (
     DEFAULT_QWEN_MODEL_DATASET_SOURCE,
     DEFAULT_SERVED_MODEL_NAME,
@@ -48,12 +51,17 @@ from inference.framework.kaggle import (
     duck_kaggle_setup_command,
     duck_kaggle_teardown_command,
 )
+from inference.utils.openai_compat import build_chat_payload
 from inference.utils.viewer_artifacts import (
     append_raw_events_sidecar,
     reset_raw_events_sidecar,
 )
 
 AnalyzerFactory = Callable[[taaf.game.Game, int], Any]
+
+import logging
+
+log = logging.getLogger(__name__)
 
 ANALYZER_RETRY_BACKOFF_SECONDS = 1.0
 DEFAULT_CANCEL_DRAIN_TIMEOUT_SECONDS = 120.0
@@ -183,6 +191,8 @@ class _HarnessGameSession:
     last_engine_action: str | None = None
     token_baseline: int = 0
     _viewer_events_flushed: int = field(default=0, init=False, repr=False)
+    _debrief: Any = field(default=None, init=False, repr=False)
+    _debrief_ready: bool = field(default=False, init=False, repr=False)
 
     def current_frame(self) -> Frame:
         return Frame(
@@ -664,6 +674,63 @@ class _HarnessGameSession:
         action = arcengine.ActionInput(id=arcengine.GameAction.RESET, data={})
         self._execute_action(action, batch_index=1, batch_size=1, generated_tokens=0)
 
+    def _debrief_runtime(self):
+        if not self._debrief_ready:
+            self._debrief_ready = True
+            config = load_debrief_config()
+            if config.enabled:
+                run = self.game.game_run
+                game_id = run.game_id if run is not None else str(self.game_index)
+                self._debrief = DebriefRuntime(config, game_id=game_id)
+                self._debrief.reset(game_id)     # asserts no cross-game leak
+        return self._debrief
+
+    def _debrief_llm_call(self, prompt: str, max_tokens: int, timeout_s: float,
+                          temperature: float) -> str:
+        """One small completion on the analyzer's own endpoint/client."""
+        payload = build_chat_payload(
+            provider=self.analyzer._model.provider,
+            model=self.analyzer._model.model_id,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=0.95,
+            top_k=0,
+            thinking=False,
+        )
+        response = requests.post(
+            f"{self.analyzer._model.base_url.rstrip('/')}/chat/completions",
+            headers=self.analyzer._headers(),
+            json=payload,
+            timeout=timeout_s,
+        )
+        response.raise_for_status()
+        choices = response.json().get("choices") or []
+        if not choices:
+            raise requests.RequestException("debrief call returned no choices")
+        message = choices[0].get("message", {})
+        content = str(message.get("content") or "").strip()
+        if content:
+            return content
+        # thinking models can spend the whole budget before emitting content
+        return str(message.get("reasoning_content") or "").strip()
+
+    def _on_level_completed(self, level: int) -> None:
+        debrief = self._debrief_runtime()
+        if debrief is None:
+            return
+        run = self.game.game_run
+        baselines = getattr(run, "base_actions_per_level", None) if run else None
+        baseline = None
+        if baselines and 0 <= level - 1 < len(baselines):
+            baseline = baselines[level - 1]
+        block = debrief.on_level_completed(
+            level=level, llm_call=self._debrief_llm_call,
+            baseline_actions=baseline)
+        setter = getattr(self.analyzer, "set_debrief_block", None)
+        if setter is not None:
+            setter(block)
+
     def _execute_action(
         self,
         action: arcengine.ActionInput,
@@ -728,6 +795,18 @@ class _HarnessGameSession:
             "batch_size": batch_size,
             **self.timing_payload(),
         }
+        debrief = self._debrief_runtime()
+        if debrief is not None:
+            debrief.note_action({
+                "type": "action",
+                "action_display": action_display,
+                "action_name": action.id.name,
+                "board_changed": board_changed,
+                "level_completed": level_completed,
+                "board": [list(row) for row in _grid_from_state(new_state)],
+            })
+            if level_completed:
+                self._on_level_completed(int(new_state.levels_completed))
         self._append_action_viewer_event(payload, current_frame)
         if flush_viewer_payload:
             self.write_viewer_payload()
