@@ -355,3 +355,62 @@ about (the previous goal-hints ablation used n=10 and its 8/10 was
 uninformative in both directions). Per the standing rules the criterion is
 not being loosened and no partial run is being reported as evidence. The
 decision to spend the compute is the operator's.
+
+## Live 3-game mechanism check — and the failure it exposed
+
+Real model (DeepInfra Qwen3.6-27B), 20 min/game, debrief enabled, games
+`sb26`, `vc33`, `ft09` (highest level-1 clear rate inside the selection set,
+so the trigger is likely). **Not an ablation** — n=3 has no power.
+
+| game | outcome |
+|---|---|
+| sb26 | level 1 cleared, score 0.10, 127 actions (93 on level 1) — **one `[DEBRIEF] ok`, latency 6769 ms, block 328 tokens** |
+| vc33 | **invalid** — the game never opened: TLS handshake timeout to `three.arcprize.org`, then `observation_space is None after make()`. Infrastructure, not measurement |
+| ft09 | 0 levels, score 0.00, 56 actions — no transition, so no debrief |
+
+### What worked
+
+The rewrite call itself is sound where compaction was not: **6.8 s against a
+90 s budget** on a live endpoint, versus compaction's 1488/1488 failures at
+20 s. No timeout, no fallback, no oversize output.
+
+### What did not — and my earlier claim was wrong
+
+I reported this run as "worked cleanly". Inspecting the block that actually
+reached the prompt shows it was **garbage**: the model restated the
+instruction's angle-bracket placeholders verbatim and then pasted the trace
+back:
+
+    CONFIRMED MECHANICS: <what actions do, as tested facts>
+    DEAD ACTIONS: <action ids that never changed the board, or 'none'>
+    WHAT CLEARED THE LAST LEVEL: <one line>
+    FIRST THINGS TO TEST ON THIS LEVEL: <2-3 specific probes>
+      - **Trace Data:** - `action_effects`: - SPACE: changed 66 ...
+
+The parser accepted it because it only checked that the four headers were
+*present*, never that they were *filled*. That block was then injected into
+**17 subsequent prompts**. This is precisely the silent degradation the
+design was meant to prevent, arriving through my own prompt and parser.
+
+Fixes (35 tests now, incl. the verbatim live reply as a regression case):
+* the instruction shows a **filled example** instead of echoable placeholders
+  and explicitly says "write your OWN content ... do not restate the trace";
+* `parse_block` rejects any section whose content is an unfilled `<...>`
+  slot or empty;
+* a reply containing >= 2 machine-readable packet keys (`action_effects`,
+  `clear_trigger`, `stall_segments`, `actions_used`) is treated as a trace
+  dump and rejected.
+
+### Hypothesis worth tracking, not a conclusion
+
+`sb26` spent 93 actions on level 1 against a historical range of 9-26 for
+that game, with a polluted prompt for 17 turns. That is consistent with the
+garbage block hurting, but n=1 and the prompt pollution is now fixed, so it
+is a hypothesis for the ablation's secondary metrics, not a finding.
+
+### Ablation runner requirement added
+
+`vc33` shows runs can die before the game opens (10 s timeout inside the
+`arc_agi` client, not ours). The Phase 4 runner must retry such runs and
+exclude them from the denominator rather than counting them as failures to
+clear level 1.

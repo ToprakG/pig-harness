@@ -42,12 +42,17 @@ _INSTRUCTION = (
     "You are compressing a factual trace of the level a game-playing agent "
     "just cleared into standing instructions for its NEXT level of the same "
     "game. Use ONLY facts present in the trace; do not speculate and do not "
-    "mention any action id that does not appear in it. Reply with exactly "
-    "these four lines, nothing else:\n"
-    "CONFIRMED MECHANICS: <what actions do, as tested facts>\n"
-    "DEAD ACTIONS: <action ids that never changed the board, or 'none'>\n"
-    "WHAT CLEARED THE LAST LEVEL: <one line>\n"
-    "FIRST THINGS TO TEST ON THIS LEVEL: <2-3 specific probes>\n"
+    "mention any action id that does not appear in it.\n\n"
+    "Reply with exactly four lines in this form — write your OWN content "
+    "after each label. Do not copy this example, do not restate the trace, "
+    "and do not add any other text:\n\n"
+    "CONFIRMED MECHANICS: SPACE recolours the target; MOUSE reveals objects "
+    "about half the time.\n"
+    "DEAD ACTIONS: none\n"
+    "WHAT CLEARED THE LAST LEVEL: two MOUSE clicks made the target vanish, "
+    "then SPACE finished it.\n"
+    "FIRST THINGS TO TEST ON THIS LEVEL: probe SPACE once; try MOUSE on the "
+    "new object; check whether MOUSE still stalls.\n"
 )
 
 
@@ -111,7 +116,33 @@ def parse_block(text: str) -> dict[str, str] | None:
             sections[current] = f"{sections[current]} {line}".strip()
     if any(section not in sections for section in REQUIRED_SECTIONS):
         return None
+    for section, content in sections.items():
+        if _is_placeholder(content):
+            # the model echoed the template instead of writing content; a
+            # first live run produced exactly this and the block still passed
+            return None
+    if _looks_like_trace_dump(text):
+        return None
     return sections
+
+
+_PLACEHOLDER_RE = re.compile(r"^\s*<[^>]*>\s*$")
+# keys that only ever appear in the machine-readable packet
+_TRACE_KEYS = ("action_effects", "clear_trigger", "stall_segments",
+               "dead_actions\":", "actions_used")
+
+
+def _is_placeholder(content: str) -> bool:
+    """True for an unfilled template slot such as `<one line>` or an empty
+    section — the model restated the form instead of answering it."""
+    text = (content or "").strip()
+    return not text or bool(_PLACEHOLDER_RE.match(text))
+
+
+def _looks_like_trace_dump(text: str) -> bool:
+    """True when the reply pastes the packet back rather than compressing it."""
+    lowered = (text or "").lower()
+    return sum(key.lower() in lowered for key in _TRACE_KEYS) >= 2
 
 
 def validate_evidence(sections: dict[str, str],

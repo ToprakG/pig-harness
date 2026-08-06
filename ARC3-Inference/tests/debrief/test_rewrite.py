@@ -141,3 +141,45 @@ def test_llm_call_receives_the_configured_limits():
     rewrite(packet(), "", spy, config=config(max_tokens=400, timeout_s=90,
                                              temperature=0.3))
     assert seen == {"max_tokens": 400, "timeout_s": 90, "temperature": 0.3}
+
+
+# ---- regression: the first live run produced exactly this ----------------
+
+LIVE_TEMPLATE_ECHO = (
+    "CONFIRMED MECHANICS: <what actions do, as tested facts>\n"
+    "DEAD ACTIONS: <action ids that never changed the board, or 'none'>\n"
+    "WHAT CLEARED THE LAST LEVEL: <one line>\n"
+    "FIRST THINGS TO TEST ON THIS LEVEL: <2-3 specific probes> "
+    "- **Trace Data:** - `action_effects`: - SPACE: changed 66, effect "
+    '"recoloured", unchanged 0 - MOUSE: changed 13 - `actions_used`: 93 '
+    "- `clear_trigger`: - MOUSE -> appeared - `stall_segments`: []\n"
+)
+
+
+def test_template_echo_is_rejected_not_injected():
+    """The real failure: the model restated the instruction's placeholders and
+    dumped the trace; the parser accepted it because the four headers were
+    present, and 17 prompts were polluted with it."""
+    result = rewrite(packet(), "prev", lambda *a: LIVE_TEMPLATE_ECHO,
+                     config=config())
+    assert not result.ok, "template echo must not become a standing block"
+    assert result.reason == "malformed_output"
+
+
+def test_unfilled_placeholder_in_any_section_is_rejected():
+    text = VALID.replace("DEAD ACTIONS: MOUSE", "DEAD ACTIONS: <none>")
+    assert rewrite(packet(), "", lambda *a: text, config=config()).ok is False
+
+
+def test_raw_trace_dump_is_rejected():
+    text = (VALID.rstrip("\n") +
+            " action_effects: SPACE changed 66; clear_trigger: MOUSE; "
+            "stall_segments: []\n")
+    assert rewrite(packet(), "", lambda *a: text, config=config()).ok is False
+
+
+def test_instruction_no_longer_offers_echoable_placeholders():
+    from inference.debrief.rewrite import build_prompt
+    prompt = build_prompt(packet(), "")
+    assert "<what actions do" not in prompt and "<one line>" not in prompt
+    assert "write your OWN content" in prompt
