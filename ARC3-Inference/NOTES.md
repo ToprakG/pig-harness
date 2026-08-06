@@ -510,3 +510,43 @@ The ratchet is the part every earlier design in this project lacked:
   owns level transitions and overlapping writes destroy attribution.
 
 `pytest tests/reflect -q` -> 20 passed.
+
+## Phase 4 — wiring and smoke
+
+Wired: `ReflectRuntime` per game session, driven from the solver's action
+path; the block is injected as a **separate labelled region** after the
+debrief block (credit assignment), and cleared at level transitions.
+
+End-to-end smoke through the real solver hook (fake game whose board freezes
+after action 5, stubbed revise reply):
+
+    [REFLECT] fire game=fake-stall level=1 t=20 noop20=0.75 nov30=0.25 revision=1
+    [REFLECT] dropped game=fake-stall detail=NEXT PROBES: unknown action id(s) ['MOUSE']
+    [REFLECT] ok game=fake-stall level=1 tokens=94 latency_ms=0
+    [REFLECT] rollback game=fake-stall level=1 revision=1 reason=no_improvement
+    [REFLECT] fire game=fake-stall level=1 t=45 noop20=1.00 nov30=0.03 revision=2
+    [REFLECT] ok game=fake-stall level=1 tokens=94 latency_ms=0
+    [REFLECT] fired=2 ok=2 rollback=1 fallback=0
+
+    --- next turn's prompt contains: ---
+    STALL REVISION (auto-generated after a detected stall)
+    WHY STUCK: SPACE has not changed the board in the last 12 actions.
+    ABANDONED: that SPACE toggles the target.
+    NEW HYPOTHESIS: the target only reacts after MOUSE selects it.
+    NEXT PROBES: (dropped: named actions not in the trace)
+
+Every designed behaviour is visible in that trace:
+* the detector fires at the warm-up boundary with a real no-op rate (0.75);
+* **the ratchet rolled the first revision back** — the board stayed frozen
+  through the evaluation window, so the block was reverted and the text
+  discarded, while still consuming budget;
+* the cooldown held exactly (45 − 20 = 25);
+* the budget stopped the loop at 2 revisions;
+* the write-gate dropped `MOUSE` from `NEXT PROBES` — correctly: the fake
+  game's `available_actions` do not include ACTION6, so that probe was not
+  executable. The validator is refusing an unexecutable instruction, not
+  malfunctioning.
+
+**No conclusions from this smoke run.** It shows the loop fires, revises,
+evaluates, reverts and injects; it says nothing about whether any of that
+helps a real agent.

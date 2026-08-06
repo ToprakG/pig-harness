@@ -38,6 +38,7 @@ from inference.agent.runtime_state import (
 )
 from inference.agent.tool_agent import ToolAgent
 from inference.debrief.runtime import DebriefRuntime, load_config as load_debrief_config
+from inference.reflect.runtime import ReflectRuntime, load_config as load_reflect_config
 from inference.framework.kaggle import (
     DEFAULT_QWEN_MODEL_DATASET_SOURCE,
     DEFAULT_SERVED_MODEL_NAME,
@@ -193,6 +194,8 @@ class _HarnessGameSession:
     _viewer_events_flushed: int = field(default=0, init=False, repr=False)
     _debrief: Any = field(default=None, init=False, repr=False)
     _debrief_ready: bool = field(default=False, init=False, repr=False)
+    _reflect: Any = field(default=None, init=False, repr=False)
+    _reflect_ready: bool = field(default=False, init=False, repr=False)
 
     def current_frame(self) -> Frame:
         return Frame(
@@ -685,6 +688,32 @@ class _HarnessGameSession:
                 self._debrief.reset(game_id)     # asserts no cross-game leak
         return self._debrief
 
+    def _reflect_runtime(self):
+        if not self._reflect_ready:
+            self._reflect_ready = True
+            config = load_reflect_config()
+            if config.enabled:
+                run = self.game.game_run
+                game_id = run.game_id if run is not None else str(self.game_index)
+                self._reflect = ReflectRuntime(config, game_id=game_id)
+        return self._reflect
+
+    def _run_reflect(self, *, action_display: str, board_changed: bool,
+                     grid: Any, level: int, level_completed: bool) -> None:
+        reflect = self._reflect_runtime()
+        if reflect is None:
+            return
+        block = reflect.note_action(
+            action=action_display, board_changed=board_changed, board=grid,
+            level=level, level_cleared=level_completed,
+            valid_actions=to_model_actions(_engine_action_names(self.game)),
+            llm_call=self._debrief_llm_call,     # same endpoint/client
+            current_plan=getattr(self.analyzer, "debrief_block", lambda: "")(),
+        )
+        setter = getattr(self.analyzer, "set_reflect_block", None)
+        if setter is not None:
+            setter(block)
+
     def _debrief_llm_call(self, prompt: str, max_tokens: int, timeout_s: float,
                           temperature: float) -> str:
         """One small completion on the analyzer's own endpoint/client."""
@@ -807,6 +836,11 @@ class _HarnessGameSession:
             })
             if level_completed:
                 self._on_level_completed(int(new_state.levels_completed))
+        self._run_reflect(action_display=action_display,
+                          board_changed=board_changed,
+                          grid=_grid_from_state(new_state),
+                          level=_level_number(self.game),
+                          level_completed=level_completed)
         self._append_action_viewer_event(payload, current_frame)
         if flush_viewer_payload:
             self.write_viewer_payload()

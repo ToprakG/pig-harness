@@ -958,6 +958,13 @@ class ToolAgent:
         # Level-debrief block: appended to the prompt, never replacing it, and
         # discarded whenever a new game session starts (no cross-game carry).
         self._debrief_block = ""
+        self._reflect_block = ""
+
+    def set_reflect_block(self, block: str) -> None:
+        self._reflect_block = str(block or "").strip()
+
+    def _reflect_lines(self) -> list[str]:
+        return [self._reflect_block] if self._reflect_block else []
 
     def set_debrief_block(self, block: str) -> None:
         self._debrief_block = str(block or "").strip()
@@ -997,6 +1004,7 @@ class ToolAgent:
             self._last_action_result = None
             self._summarized_knowledge = _empty_world_model()
             self._debrief_block = ""
+            self._reflect_block = ""
 
     @property
     def total_tokens(self) -> int:
@@ -1250,6 +1258,7 @@ class ToolAgent:
         )
         lines.extend(self._summarized_knowledge_lines())
         lines.extend(self._debrief_lines())
+        lines.extend(self._reflect_lines())
         lines.append("end of world model. ")
         if action_num == 0:
             lines.append(
