@@ -487,3 +487,26 @@ defaults `noop_threshold=0.25`, `novelty_threshold=0.5` are kept**: they sit
 on the tie plateau, and picking 0.20/0.40 purely because it was evaluated
 first would be exactly the overfitting the LOGO procedure exists to prevent.
 Recorded as a deliberate choice, not an oversight.
+
+## Phases 2-3 — revise call and the rollback ratchet
+
+`inference/reflect/revise.py`. The five stub cases pass (valid, timeout,
+malformed incl. template echo, hallucinated id, oversize), plus a trace-dump
+rejection carried over from the debrief branch's live failure — the same
+mistake would otherwise have been repeated here.
+
+The ratchet is the part every earlier design in this project lacked:
+
+* `may_fire` gates on warm-up (>=20 actions), cooldown (25), an open
+  evaluation, and the per-level budget (2);
+* `accept` pushes the block and remembers the pre-revision text plus the set
+  of board hashes seen at fire time;
+* `evaluate` at fire+`eval_window` counts improvement as *no longer stalled*
+  OR *a board state unseen at fire time* OR *level cleared*; anything else
+  reverts the block, discards the text, counts a rollback — **and still
+  consumes budget**, so a thrashing loop cannot retry indefinitely;
+* the stack is bounded at 3 (asserted over a 10-revision replay);
+* `reset_level()` clears the block and asserts it, because the debrief branch
+  owns level transitions and overlapping writes destroy attribution.
+
+`pytest tests/reflect -q` -> 20 passed.
