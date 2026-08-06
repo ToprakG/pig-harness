@@ -1335,7 +1335,12 @@ class ToolAgent:
         grid. This hint narrows that general guidance back down for the specific
         case where it does not apply.
         """
-        actions = {str(a).strip().upper() for a in (valid_actions or [])}
+        # valid_actions here are raw engine names (ACTION1-6), not the
+        # model-facing UP/DOWN/LEFT/RIGHT/SPACE/MOUSE labels shown to the
+        # model elsewhere -- translate before matching, or this silently
+        # never fires (found via live debug: feature flag was on, condition
+        # was just always false).
+        actions = {to_model_action(a) for a in (valid_actions or [])}
         directional = {"UP", "DOWN", "LEFT", "RIGHT"}
         if "MOUSE" in actions or not (actions & directional):
             return []
