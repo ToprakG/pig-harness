@@ -303,3 +303,55 @@ before emitting `content` (that failure mode has bitten a previous feature).
 
 **No conclusions are drawn from this smoke run** — it shows the mechanism
 fires and reaches the next level's prompt, nothing about whether it helps.
+
+## Phase 4 — powered ablation: plan, and the compute wall
+
+### Game selection (rule, not eyeball)
+
+Applied to `example-run/benchmark.json` by
+`inference.debrief.ablation select`:
+
+  R1  level-1 clear rate >= 0.5 (so level-2 transitions are sampled)
+  R2  0.1 <= P(level 2 | level 1) <= 0.9 (the endpoint must be able to move
+      in both directions; a game stuck at 0.00 or 1.00 contributes samples
+      but no resolvable signal)
+
+    game                  n  L1 rate  P(L2|L1)
+    ar25-0c556536        20     0.75      0.27
+    ft09-0d8bbf25        20     0.75      0.87
+    re86-8af5384d        20     0.65      0.38
+    sb26-7fbdac44        20     1.00      0.10
+    vc33-5430563c        20     0.90      0.72
+
+    selected=5/25 pooled_l1=0.81 pooled_cond_l2=0.47
+
+R2 is an addition to the brief's rule and is recorded as such: R1 alone
+admits 14 games, 9 of which have P(L2|L1) = 0.00 and would spend compute on
+an endpoint that cannot move.
+
+### Power (reproduced independently)
+
+`inference.debrief.ablation power --baseline-rate 0.30 --effect-rate 0.60
+--corrections 2` (one-sided Fisher, 20k sims):
+
+    n=10 -> 0.13    n=25 -> 0.51    n=50 -> 0.83    n=75 -> 0.96
+
+This matches the brief's figures and confirms n>=50 per arm.
+
+### The wall: what n=50 actually costs
+
+n is 50 runs that CLEAR LEVEL 1 per arm. At the pooled level-1 rate of 0.81
+that is **62 runs per arm, 123 runs total**.
+
+| route | wall-clock | money |
+|---|---|---|
+| local, DeepInfra, 20 min/game | ~41 h sequential | ~$50-68 |
+| local, DeepInfra, 10 min/game | ~21 h sequential | ~$25-35 |
+| Kaggle save-runs (25 games/session, ~1.8 h, local vLLM) | ~11 h over 6 sessions | **$0** |
+
+**STATUS: not run.** Acceptance for this phase requires n>=50 per arm; a
+smaller pilot would produce exactly the uninformative result the brief warns
+about (the previous goal-hints ablation used n=10 and its 8/10 was
+uninformative in both directions). Per the standing rules the criterion is
+not being loosened and no partial run is being reported as evidence. The
+decision to spend the compute is the operator's.
