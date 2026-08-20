@@ -1,42 +1,41 @@
-# Göktürk V3: keyboard modality prompt hints + runtime-cap root cause
+# Göktürk V4: request-timeout collapse fix + keyboard modality hints (correction)
 
-## Keyboard modality (avatar probe + occupancy + BFS)
+## Correction to earlier claim in this file
 
-Grounding: place/grid/head-direction cells -- navigation runs on a dedicated
-allocentric-map substrate, not a trial-and-error policy. Duck's own 500-run
-analysis: keyboard-only games mean 0.12 vs click 2.20; two score zero across
-20 attempts.
+Earlier version of this doc claimed the runtime-cap bug was already fixed
+downstream via a pickle byte-patch, based on a Kaggle run finishing in
+8h35m (matching a proposed 30900s value). **That inference was wrong.**
+Fetched the actual run log afterward: `max_runtime_s_per_game=7920.0` was
+still in effect, unchanged, for that run. The longer duration and 2.87->8.25
+mean-score jump between two byte-identical notebook versions (Kaggle UI
+diff: +0/-0) is explained by the SAME unfixed bug behaving differently
+run-to-run -- not a fix. Score is currently a coin flip on this bug.
 
-IMPORTANT OVERLAP: `feat/keyboard-nav-hints` already ships a feature-flagged
-`_keyboard_nav_lines()` (`DUCK_KEYBOARD_NAV_HINTS`) doing essentially this.
-Checked before writing -- found after, not before, this draft was written
-locally. **Prefer that branch.** This commit is kept for the independent
-derivation / comparison value, not as a merge candidate over it.
+## Actual root cause (confirmed against `fix/request-timeout-soft-deadline`)
 
-## Runtime-cap root cause (Kaggle submission artifact, not this repo's code)
+`solver.py: request_timeout_seconds()` took the min of three candidates:
+configured timeout, per-game remaining time, and session-wide
+`soft_time_remaining_seconds()`. The third one is a *pacing hint shared
+across all games*, not a per-request budget. Once the session soft deadline
+passes, it reads 0.0 for every game that starts afterward -- flooring the
+per-request timeout at `max(0.1, min(...))` = 0.1s. No request can complete
+in 0.1s, `should_stop()` has no soft-deadline check, so the game spins
+failing requests (`Read timed out. (read timeout=0.1)`, thousands of them
+in one observed run) until the unrelated 7920s per-game hard cap finally
+kills it -- burning ~76% of the wall-clock budget on nothing.
 
-On a Kaggle run of a duck-derived submission notebook, all 25/25 games were
-cut off within 30 seconds of each other (7920-7950s), not by natural
-completion. Root cause: `benchmark_initial.pkl` (a build-time artifact, not
-tracked in this source repo) had `max_runtime_s_per_game=7920.0` (132 min)
-baked in regardless of the 9h total budget, with `concurrency=28 >= 25 games`
-so all games run in one round and all hit the same wall. ~76% of the 9h
-budget went unused.
+## Fix applied (this commit)
 
-IMPORTANT OVERLAP: `fix/request-timeout-soft-deadline` ("drop session soft
-deadline from per-request budget") is very likely the same class of bug.
-Check that branch's mechanism before assuming this note's byte-patch method
-is needed -- it may already be fixed upstream of wherever `benchmark_initial.pkl`
-gets built.
+Removed `soft_remaining` from the candidate list in
+`request_timeout_seconds()` (`ARC3-Inference/inference/framework/solver.py`).
+Matches `fix/request-timeout-soft-deadline` exactly -- same diff, verified
+independently against my own diagnosis before copying. That branch should
+still be preferred for merge if it has more testing behind it; this commit
+exists so the Kaggle bundle (a separate deployment artifact, not wired to
+this repo) can carry the identical fix.
 
-Fix applied downstream (not in this repo): patched the pickled float in place
-(`struct.pack_into('>d', ...)`, offset located via `pickletools.dis`) from
-7920.0 to 30900.0 (515 min = 9h minus ~25min setup/teardown budget). Verified
-the pickle still parses (`pickletools.dis` succeeds) but not yet verified
-against a real re-run.
+## Keyboard modality prompt hints
 
-## NEURO.md
-
-Full neuroscience-grounding writeup (CLS, perseveration, predictive coding,
-place/grid cells, successor representation, and where the analogy stops) is
-in this same commit for reference.
+Unchanged from V3 note: grounding in place/grid/head-direction cells,
+overlaps `feat/keyboard-nav-hints` (prefer that branch), kept here for the
+independent-derivation comparison value.
