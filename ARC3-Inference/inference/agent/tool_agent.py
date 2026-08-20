@@ -1271,6 +1271,8 @@ class ToolAgent:
         summary = self._last_step_summary
         if not summary:
             return
+        if summary.get("level_transition"):
+            self._levels_seen += 1
         if summary.get("level_transition") or summary.get("run_complete") or summary.get("game_over"):
             for key in (
                 "world_model",
@@ -1281,6 +1283,8 @@ class ToolAgent:
                 "current_plan",
             ):
                 self._summarized_knowledge[key] = ""
+
+    _levels_seen: int = 0
 
     def _summarized_knowledge_lines(self) -> list[str]:
         entries = [
@@ -1293,6 +1297,15 @@ class ToolAgent:
             ("Cross-level notes", self._summarized_knowledge.get("cross_level_notes", "")),
         ]
         lines = [f"- {label}: {value}" for label, value in entries if value]
+        if self._levels_seen >= 1 and not self._summarized_knowledge.get("cross_level_notes", ""):
+            lines.append(
+                "- REMINDER: you have completed at least one level and "
+                "`Cross-level notes:` is still empty. Control mapping and "
+                "mechanics (what each key/click does, which object is the "
+                "avatar, what is a wall) usually carry over across levels even "
+                "though layout and goal reset -- write them here instead of "
+                "re-deriving from scratch."
+            )
         if not lines:
             return []
         return [
