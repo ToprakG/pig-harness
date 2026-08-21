@@ -11,6 +11,7 @@ import math
 import os
 import sys
 import threading
+import time
 import warnings
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -245,9 +246,12 @@ class GameAPI(Game):
         self.grid_size = (64, 64)
         return GameState(raw=initial)
 
+    _GATEWAY_MAX_RETRIES = 5
+    _GATEWAY_BACKOFF_BASE_S = 0.5
+
     def _execute_action(self, action: arcengine.ActionInput) -> GameState:
         assert self.env is not None, "_execute_action before _start_game"
-        resp = self.env.step(action.id, data=dict(action.data))
+        resp = self._step_with_backoff(action)
         if resp is None:
             raise RuntimeError(f"env.step returned None for action {action.id.name}")
         # Empty frame = engine refused to advance (typically a non-RESET
@@ -262,6 +266,65 @@ class GameAPI(Game):
                 f"and issue RESET when it fires."
             )
         return GameState(raw=resp)
+
+    def _step_with_backoff(self, action: arcengine.ActionInput):
+        """``self.env.step`` with retry+backoff on the ARC gateway's 429.
+
+        Root cause this guards against: the official ``arc_agi`` remote
+        wrapper calls ``response.raise_for_status()`` unconditionally on
+        every gateway request (verified in arc_agi==0.9.9
+        remote_wrapper.py:108,199) with no retry of its own. The documented
+        gateway limit is 600 requests/minute account-wide
+        (docs.arcprize.org/rate_limits.md), shared across every concurrently
+        running game in this benchmark's thread pool. A burst above that
+        limit currently surfaces as an unhandled HTTPError two layers up in
+        solver.py, which converts it into ``stop_reason="action_error"`` --
+        silently costing the game a wasted LLM turn (and, if it recurs,
+        compounding into repeated re-plans) with no visibility that a rate
+        limit, not a real environment error, was the cause.
+
+        Only retries on 429 and on the connection-level errors a saturated
+        gateway plausibly produces (timeout/connection-reset); any other
+        HTTPError (4xx game-logic errors, 5xx that isn't rate-limit-shaped)
+        is re-raised immediately unchanged, preserving existing behavior.
+        """
+        import requests
+
+        last_exc: Exception | None = None
+        for attempt in range(self._GATEWAY_MAX_RETRIES):
+            try:
+                return self.env.step(action.id, data=dict(action.data))
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else None
+                if status != 429:
+                    raise
+                last_exc = exc
+                retry_after = None
+                if exc.response is not None:
+                    header = exc.response.headers.get("Retry-After")
+                    if header:
+                        try:
+                            retry_after = float(header)
+                        except ValueError:
+                            retry_after = None
+                delay = retry_after if retry_after is not None else (
+                    self._GATEWAY_BACKOFF_BASE_S * (2 ** attempt)
+                )
+                logging.getLogger(__name__).warning(
+                    "ARC gateway 429 on %s, retry %d/%d in %.1fs",
+                    self.env_name, attempt + 1, self._GATEWAY_MAX_RETRIES, delay,
+                )
+                time.sleep(delay)
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+                last_exc = exc
+                delay = self._GATEWAY_BACKOFF_BASE_S * (2 ** attempt)
+                logging.getLogger(__name__).warning(
+                    "ARC gateway connection error on %s, retry %d/%d in %.1fs: %s",
+                    self.env_name, attempt + 1, self._GATEWAY_MAX_RETRIES, delay, exc,
+                )
+                time.sleep(delay)
+        assert last_exc is not None
+        raise last_exc
 
     def _finish_game(self) -> None:
         """R11.12 reconciliation. Defensive — never raises."""
