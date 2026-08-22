@@ -8,6 +8,7 @@ import copy
 import functools
 import html
 import json
+import logging
 import os
 import re
 import subprocess
@@ -183,6 +184,8 @@ class _HarnessGameSession:
     last_engine_action: str | None = None
     token_baseline: int = 0
     _viewer_events_flushed: int = field(default=0, init=False, repr=False)
+    level_start_action: int = field(default=0, init=False, repr=False)
+    _last_levels_completed: int = field(default=-1, init=False, repr=False)
 
     def current_frame(self) -> Frame:
         return Frame(
@@ -289,12 +292,40 @@ class _HarnessGameSession:
         self.write_viewer_payload()
         try:
             retry_analysis_step: int | None = None
+            # Calibrated from feat/meta-calibration's Kaplan-Meier fit on first-
+            # level-clear time (inference/meta/survival.py + REPORT.md): windowed
+            # hazard collapses to ~0.008/20-action-window by t=140 with zero
+            # progress. STALL_ACTION_CAP below is ~1.8x that checkpoint -- a
+            # deliberately generous margin so a merely-hard level is not cut off,
+            # while a genuine dead loop is. Without this, max_actions_per_level
+            # was accepted as solver config but never read anywhere in this file
+            # -- a run could (and, observed once, did: 2547 actions on one level,
+            # zero clears, ~44% of that game's whole action budget) spin
+            # indefinitely on one stuck level with nothing to stop it.
+            STALL_ACTION_CAP = 250
+
             while not self.should_stop():
+                completed_now = int(self.game.current_state.levels_completed)
+                if completed_now != self._last_levels_completed:
+                    self._last_levels_completed = completed_now
+                    self.level_start_action = self.action_count
+
                 if (
                     _is_engine_game_over(self.game)
                     and self.last_engine_action != "RESET"
                 ):
                     self._execute_auto_reset()
+                    continue
+
+                if self.action_count - self.level_start_action >= STALL_ACTION_CAP:
+                    logging.getLogger(__name__).warning(
+                        "Level stall cap hit: %d actions since level start with "
+                        "no clear (game=%s level=%d) -- forcing a level reset.",
+                        self.action_count - self.level_start_action,
+                        self.game.game_id, _level_number(self.game),
+                    )
+                    self._execute_auto_reset()
+                    self.level_start_action = self.action_count
                     continue
 
                 if retry_analysis_step is None:
