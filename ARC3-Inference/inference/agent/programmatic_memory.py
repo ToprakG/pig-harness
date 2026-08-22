@@ -157,6 +157,7 @@ class ProgrammaticMemory:
         score: int,
         level: int,
         board_changed: bool | None = None,
+        animated: bool | None = None,
         state: str | None = None,
         plan: str | None = None,
         plan_step: tuple[int, int] | None = None,
@@ -189,6 +190,12 @@ class ProgrammaticMemory:
         meta: list[str] = []
         if board_changed is not None:
             meta.append(f"board_changed={bool(board_changed)}")
+            if animated and not board_changed:
+                meta.append(
+                    "animated=True (transient effect in intermediate frames, "
+                    "settled frame reverted -- do not treat board_changed=False "
+                    "here as proof the action was inert)"
+                )
         if state:
             meta.append(f"state={state}")
         if meta:

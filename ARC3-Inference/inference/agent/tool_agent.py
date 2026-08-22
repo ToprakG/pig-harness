@@ -1086,6 +1086,7 @@ class ToolAgent:
         score: int,
         level: int,
         board_changed: bool | None = None,
+        animated: bool | None = None,
         state: str | None = None,
         state_path: Path | None = None,
     ) -> None:
@@ -1103,6 +1104,7 @@ class ToolAgent:
             score=score,
             level=level,
             board_changed=board_changed,
+            animated=animated,
             state=state,
             plan=plan,
         )
@@ -1211,6 +1213,7 @@ class ToolAgent:
             "run_complete": any(bool(item.get("run_complete")) for item in executed_results),
             "game_over": any(bool(item.get("game_over")) for item in executed_results),
             "board_changed": any(bool(item.get("board_changed")) for item in executed_results),
+            "animated": any(bool(item.get("animated")) for item in executed_results),
             "stop_reason": last.get("stop_reason"),
         }
 
@@ -1242,6 +1245,12 @@ class ToolAgent:
         pieces = [prefix]
         if summary.get("board_changed"):
             pieces.append("produced a board change; verify that it affected gameplay objects rather than only HUD elements.")
+        elif summary.get("animated"):
+            pieces.append(
+                "showed a multi-frame (animated) response but the settled board matched the "
+                "pre-action state; the action may still have had a real effect that reverted "
+                "before settling -- do NOT treat this as proof the action was inert."
+            )
         else:
             pieces.append("did not show a confirmed board change; treat this as weak evidence until verified.")
         stop_reason = _normalize_summary_text(summary.get("stop_reason"))
@@ -1612,6 +1621,7 @@ class ToolAgent:
             "state": payload.get("state"),
             "valid_actions": payload.get("valid_actions", []),
             "board_changed": bool(payload.get("board_changed")),
+            "animated": bool(payload.get("animated")),
             "done": bool(payload.get("done")),
             "level_completed": bool(payload.get("level_completed")),
             "game_over": bool(payload.get("game_over")),
@@ -1697,6 +1707,7 @@ class ToolAgent:
                     "state": terminal_action_result.get("state"),
                     "valid_actions": [],
                     "board_changed": False,
+                    "animated": False,
                     "done": bool(terminal_action_result.get("done")),
                     "level_completed": bool(terminal_action_result.get("level_completed")),
                     "game_over": bool(terminal_action_result.get("game_over")),

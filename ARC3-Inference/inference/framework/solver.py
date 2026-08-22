@@ -701,6 +701,9 @@ class _HarnessGameSession:
         final_payload["board_changed"] = any(
             bool(item.get("board_changed")) for item in executed_payloads
         )
+        final_payload["animated"] = any(
+            bool(item.get("animated")) for item in executed_payloads
+        )
         final_payload["stopped_early"] = len(executed_payloads) < batch_size
         if stop_reason is not None:
             final_payload["stop_reason"] = stop_reason
@@ -751,6 +754,16 @@ class _HarnessGameSession:
         )
         raw_state = new_state.raw.state
         board_changed = previous_grid != _grid_from_state(new_state)
+        # arcengine bazen bir aksiyon icin coklu kare doner (animasyon); son
+        # (settled) kare oncekiyle ayni gorunse bile ara karelerde gercek bir
+        # etki olmus olabilir (reddedilen tiklama, tuketilen deneme, vb).
+        # board_changed=False bu durumda "hicbir sey olmadi" degil, "etki
+        # son karede geri alindi" anlamina gelir -- ikisini ayirt etmezsek
+        # LLM calisan bir aksiyonu yanlislikla olu/etkisiz sanabilir. Kanit:
+        # feature/animation-awareness branch (rakip Kaggle notebook),
+        # noop_guard.py + animation.py -- ft09/sb26 gibi cok kareli
+        # oyunlarda ayni hatayi tarif ediyor.
+        animated = len(new_state.raw.frame) > 1
         level_completed = bool(
             new_state.just_won_level and raw_state != arcengine.GameState.WIN
         )
@@ -763,6 +776,7 @@ class _HarnessGameSession:
             "state": raw_state.name,
             "valid_actions": to_model_actions(_engine_action_names(self.game)),
             "board_changed": board_changed,
+            "animated": animated,
             "done": raw_state == arcengine.GameState.WIN,
             "level_completed": level_completed,
             "game_over": raw_state == arcengine.GameState.GAME_OVER,
@@ -787,6 +801,7 @@ class _HarnessGameSession:
                 score=completed,
                 level=int(payload["level"]),
                 board_changed=board_changed,
+                animated=animated,
                 state=raw_state.name,
                 state_path=self.state_path,
             )
